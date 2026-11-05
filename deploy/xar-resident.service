@@ -1,0 +1,19 @@
+[Unit]
+Description=xar-agent resident (Camoufox window holder + heartbeat)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/xar/instance.yaml
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/xar/hand
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/resident.py
+Restart=on-failure
+RestartSec=60
+MemoryMax=1500M
+# Camoufox 深度 swap 下关闭可能慢：给足优雅停止窗口，超时 SIGKILL 后由下次启动的
+# 孤儿清扫兜底（2026-10-24 事故）
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=xar-agent cognitive heartbeat tick (TLN scheduler)
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/heartbeat.py
+TimeoutStartSec=420
+# P4-3 起一次 beat 含浏览器读 + LLM 调用，60s 不够

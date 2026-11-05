@@ -1,0 +1,8 @@
+[Unit]
+Description=xar-agent daily operator report (cognitive --report)
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/cognitive.py --report
+TimeoutStartSec=300

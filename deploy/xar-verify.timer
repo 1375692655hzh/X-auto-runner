@@ -1,0 +1,11 @@
+[Unit]
+Description=xar-agent verify-unknown every 30min
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=30min
+AccuracySec=2min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=xar-agent news auto-publisher hourly increment tick
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/news_auto.py
+TimeoutStartSec=900
+# 一小时最多5条：评分+逐条成稿+开票；dry-run验收通过前不启用 timer

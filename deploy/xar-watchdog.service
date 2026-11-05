@@ -1,0 +1,7 @@
+[Unit]
+Description=xar-agent watchdog (heartbeat dual-health check, restart resident if stale)
+
+[Service]
+Type=oneshot
+# 以 root 运行：需要 systemctl restart 权限
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/watchdog.py

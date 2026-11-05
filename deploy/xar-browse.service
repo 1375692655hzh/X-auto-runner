@@ -1,0 +1,8 @@
+[Unit]
+Description=xar-agent daily read-only browse session (human-paced feed + sightings)
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/browse.py
+TimeoutStartSec=900

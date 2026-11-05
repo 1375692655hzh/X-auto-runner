@@ -1,0 +1,9 @@
+[Unit]
+Description=xar-agent verify-unknown worker (anonymous fxtwitter reconciliation)
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/verify_unknown.py
+TimeoutStartSec=180
+# unknown≠异常铁律：FxTwitter 失败时脚本自身不动任何条目退出 0

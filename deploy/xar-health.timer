@@ -1,0 +1,10 @@
+[Unit]
+Description=Run xar health check daily 07:40 (+20m jitter)
+
+[Timer]
+OnCalendar=*-*-* 07:40:00
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

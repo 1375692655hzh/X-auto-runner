@@ -1,0 +1,44 @@
+# xar-agent 实例配置模板
+# 拷贝到 /etc/xar/instance.yaml 并填写；权限必须 600；缺任何必填项服务拒绝启动
+# 本文件不含 cookie——cookie 独立存放于 cookie_file 指向的文件（同权限 600）
+
+proxy:                      # 必填：静态住宅代理（与指纹永久绑定，规范 §三）
+  scheme: "http"            # http | socks5
+  host: ""
+  port: 0
+  username: ""
+  password: ""
+
+account:                    # 必填
+  handle: ""                # 不含 @，如 WCixot
+  cookie_file: "/etc/xar/cookies.json"   # {auth_token, ct0, twid, guest_id}
+
+persona:                    # P4 起必填
+  card: "/etc/xar/persona-card.md"
+
+llm:                        # P4 起填写：按功能分模型（成稿/评论/回复/报告/夜整理）
+  draft:    {provider: "", model: "", api_key: ""}
+  comment:  {provider: "", model: "", api_key: ""}
+  reply:    {provider: "", model: "", api_key: ""}
+  report:   {provider: "", model: "", api_key: ""}
+  reflect:  {provider: "", model: "", api_key: ""}
+  # 跨供应商按序互备（2026-11-05）：主key耗尽/失效时落到下家，10分钟熔断自动跳过
+  # default:
+  #   model: "", api_key: "", base_url: ""
+  #   fallback_models: [{model: ""}]          # 同 key 同端点换模型
+  #   fallback_providers:                     # 跨供应商完整 key/端点
+  #     - {model: "", api_key: "", base_url: ""}
+
+im:                         # P3 起启用（QQ/NapCat）
+  qq:
+    enabled: false
+    bot_qq: 0               # agent 小号
+    commander_whitelist: [] # 允许下指令的 QQ 大号（安全关键，console-settings §10）
+
+runtime:
+  active_window: ["06:30", "24:00"]
+  budget_24h: {post: 95, reply: 15, like: 30, comment: 10}   # 资讯任务硬顶5条/小时×19小时；实际由信息增量决定
+  writes:
+    enabled: false            # P3 总开关：真实写动作（默认关；QQ 票据就绪后开）
+  approval:
+    default: required         # 每种动作审批模式 required|none（HYBRID 档调；none 只能由用户改）

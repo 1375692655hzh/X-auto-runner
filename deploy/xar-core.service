@@ -1,0 +1,14 @@
+[Unit]
+Description=xar-agent core (cognitive loop + IM + tickets, Node)
+After=network-online.target xar-resident.service
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/xar/core
+ExecStart=/usr/bin/env node /opt/xar/core/index.js
+Restart=on-failure
+RestartSec=60
+# P3 填充真实入口（Node 运行时届时由 bootstrap 追加安装段）；骨架不 enable
+
+[Install]
+WantedBy=multi-user.target

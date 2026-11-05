@@ -1,0 +1,45 @@
+# 生产密钥、登录态与本地配置
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+*cookies*.json
+cookie*.json
+config/instance.yaml
+config/persona-card.md
+
+# 早期登录 PoC 含真实历史凭据，保留本地但不入库
+poc-cloud/
+
+# 独立 Git 参考仓库，保留自己的版本历史，不作为主仓库内容提交
+ref/x-auto-run/
+
+# 账号运行状态、票据、账本和浏览器数据
+state/
+hand/state/
+profile-*/
+**/profile-*/
+**/tickets/
+**/intents/
+**/health-snapshots/
+*.jsonl
+*.log
+
+# 工具会话、临时任务与缓存
+.zcode/
+.moa-*
+.ai-route.log
+__pycache__/
+*.py[cod]
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# 本地测试与诊断产物
+.pytest_cache/
+.coverage
+htmlcov/
+*-diag.json

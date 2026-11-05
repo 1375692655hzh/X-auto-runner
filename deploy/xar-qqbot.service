@@ -1,0 +1,15 @@
+[Unit]
+Description=xar-agent QQ official bot bridge (pull-mode IM command surface)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/xar/hand
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/qq_bot.py
+Restart=always
+RestartSec=15
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target

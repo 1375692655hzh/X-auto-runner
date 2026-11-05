@@ -1,0 +1,12 @@
+[Unit]
+Description=Run xar browse session 3x daily in active window (+25m jitter)
+
+[Timer]
+OnCalendar=*-*-* 11:00:00
+OnCalendar=*-*-* 15:30:00
+OnCalendar=*-*-* 19:30:00
+RandomizedDelaySec=25min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
