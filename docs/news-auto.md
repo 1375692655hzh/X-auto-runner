@@ -101,7 +101,7 @@
 
 ## 供应商链与熔断（2026-11-05）
 
-- `llm.py` 新增 `fallback_providers`：同通道跨供应商完整 key/端点按序互备。default/analysis/review（kimi 三模型链）→ 阿里 `deepseek-v4.1-flash-1017` → 火山 `deepseek-v4.1-flash`。
+- `llm.py` 新增 `fallback_providers`：同通道跨供应商完整 key/端点按序互备。当前 default/analysis/review 为 Kimi 三模型链 → 火山 `deepseek-v4.1-flash`；阿里 DeepSeek 备用 key 已于 2026-11-06 按运营者要求从生产链移除。
 - 触发背景：kimi 套餐额度耗尽（全模型 429），主脑 reply 与作者/编辑链同时瘫痪。
 - 熔断：401/402/403/404 或全模型 429 判定供应商死亡，熔断 10 分钟内直接跳过；恢复/额度重置后自动回归原顺位（kimi 仍是第一顺位）。
 - 429 且还有下家时不再同 key 逐个换模型硬撞（账号级限流换模型无意义），立即 failover；单供应商配置保持逐模型互备不变。
