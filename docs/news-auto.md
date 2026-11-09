@@ -140,4 +140,11 @@ python /opt/xar/hand/news_auto.py
 - post 支持 1–4 张本地图片和 `quoted_status_id` 引用；媒体只允许 `/tmp` 下 png/jpg/jpeg，校验大小与魔数。`/dry` 带 `browser=true` 可在真页准备草稿，绝不点击发布。
 - 新增 `/read/notifications` 只读入口与 `inbox.py`：统一回复/提及/新关注事件、通知去重和对话归属。人工回复的线程不再自动续回；新关注只生成条件回关待审票。
 - `effects.py` 对 done 的 post/reply/comment 做 T+2/8/24/48h FxTwitter 只读采样；无真实结果 ID 时按公开时间线规范正文唯一匹配，无法确认不采样。聚合计数取每 intent 最新时点，避免累计指标重复相加。
-- 新能力不改变现有预算、活跃窗和审批配置；真实发布仍须单独明确验收。
+- 新能力不改变预算、活跃窗和审批配置；真实发布仍须单独明确验收。
+
+## 开跑（2026-11-09 运营拍板）
+
+- `news_auto.mode: review → auto`：资讯原创全自动直发（时效 6h/24h、unknown/连败熔断、闭环落账同步生效）。配置备份 `instance.yaml.bak-20261109-auto`。
+- approval 按 kind 配置：reply/comment/follow=none（互动全自动，质量门与预算帽仍拦截）；post 的 auto 仅由 news_auto 授权路径批准，旧 review 票不追溯放行。
+- budget_24h 对齐 x-auto-tool 任务量：post 10 / reply 20 / comment 60 / like 30 / follow 180 / unfollow 0（24h 滚动帽）。
+- 回关统一按 x-auto-tool：事件驱动自动回关。注意 x-auto-tool 的 80 评论/180 关注量由其 #互关 关键词搜索引擎供给，本架构互动为通知/关系驱动，实际日量受事件数与种子池约束。

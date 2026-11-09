@@ -49,8 +49,12 @@ ops:
 
 runtime:
   active_window: ["06:30", "24:00"]
-  budget_24h: {post: 95, reply: 15, like: 30, comment: 10}   # 资讯任务硬顶5条/小时×19小时；实际由信息增量决定
+  # 任务量对齐 x-auto-tool（2026-11-09 运营拍板开跑；此前 post95/reply15/like30/comment10 为引擎保险丝）
+  budget_24h: {post: 10, reply: 20, like: 30, comment: 60, follow: 180, unfollow: 0}
   writes:
     enabled: false            # P3 总开关：真实写动作（默认关；QQ 票据就绪后开）
   approval:
-    default: required         # 每种动作审批模式 required|none（HYBRID 档调；none 只能由用户改）
+    default: required         # 每种动作审批模式 required|none（none 只能由用户改）
+    reply: none               # 2026-11-09 开跑：互动全自动（reply/comment/follow 免审，帽见 budget_24h）
+    comment: none
+    follow: none
