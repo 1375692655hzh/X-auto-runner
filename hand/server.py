@@ -448,7 +448,11 @@ def make_handler(gw: Gateway, resident):
                     return self._send(200, gw.dry_run(body))
                 if self.path == "/execute":
                     return self._send(200, gw.execute(body))
-                if self.path in ("/read/timeline", "/read/post"):
+                if self.path == "/profile/update":
+                    if resident is None or resident.ctx is None:
+                        return self._send(503, {"error": "workstation_down"})
+                    return self._send(200, _update_profile(resident, body))
+                if self.path in ("/read/timeline", "/read/post", "/read/profile"):
                     if resident is None or resident.ctx is None:
                         return self._send(503, {"error": "workstation_down"})
                     return self._send(200, _read(resident, self.path, body))
@@ -484,6 +488,23 @@ def _read(resident, path, body):
         with resident.browser_lock:
             page = resident.ctx.new_page()
             try:
+                if path == "/read/profile":
+                    page.goto("https://x.com/settings/profile",
+                              wait_until="domcontentloaded", timeout=60000)
+                    P.sleep(6000)
+                    return page.evaluate("""() => ({
+                        url: location.href, title: document.title,
+                        text: (document.body.innerText || '').slice(0, 2500),
+                        buttons: [...document.querySelectorAll('button,[role="button"]')]
+                            .map(x => ({text: (x.innerText || '').slice(0, 80),
+                                       label: x.getAttribute('aria-label'),
+                                       testid: x.getAttribute('data-testid')})).slice(0, 50),
+                        inputs: [...document.querySelectorAll('input')].map(x => ({
+                            name: x.name, type: x.type,
+                            value: x.type === 'file' ? '' : x.value,
+                            label: x.getAttribute('aria-label')})),
+                        files: document.querySelectorAll('input[type=file]').length
+                    })""")
                 if path == "/read/timeline":
                     surface = body.get("surface", "home")
                     url = {"home": "https://x.com/home",
@@ -527,6 +548,117 @@ def _read(resident, path, body):
     if "result" in box:
         return box["result"]
     return {"error": box.get("error", "browser_task_failed")}
+
+
+def _update_profile(resident, body):
+    """本机 Token 资料维护：显示名/头像。只允许运维临时上传的本地图片，
+    不接受 URL 或任意路径；仍由工位主线程串行操作。蓝V可能进入复审。"""
+    import primitives as P
+    display_name = str(body.get("display_name") or "").strip()
+    avatar_path = body.get("avatar_path")
+    if display_name and not (1 <= len(display_name) <= 50):
+        return {"error": "display_name 长度须为1-50字"}
+    if avatar_path:
+        avatar = Path(str(avatar_path))
+        if avatar.parent != Path("/tmp") or not avatar.is_file() \
+                or avatar.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            return {"error": "avatar_path 仅允许 /tmp 下的 png/jpg 临时文件"}
+    if not display_name and not avatar_path:
+        return {"error": "未提供 display_name 或 avatar_path"}
+
+    def impl():
+        with resident.browser_lock:
+            page = resident.ctx.new_page()
+            try:
+                page.goto("https://x.com/settings/profile",
+                          wait_until="domcontentloaded", timeout=60000)
+                P.sleep(6000)
+                if display_name:
+                    field = page.locator('input[name="displayName"]')
+                    field.fill(display_name)
+                    if field.input_value() != display_name:
+                        return {"ok": False, "stage": "display_name",
+                                "note": "显示名写入后回读不一致，未保存"}
+                if avatar_path:
+                    avatar_button = page.locator('[aria-label="添加头像照片"]')
+                    if avatar_button.count():
+                        with page.expect_file_chooser(timeout=15000) as chooser:
+                            avatar_button.click()
+                        chooser.value.set_files(str(avatar_path))
+                    else:
+                        # 已有头像时 X 可能呈现“编辑照片”，通过其文件选择器进入上传。
+                        with page.expect_file_chooser(timeout=15000) as chooser:
+                            page.get_by_role("button", name="编辑照片", exact=True).click()
+                        chooser.value.set_files(str(avatar_path))
+                    P.sleep(5000)
+                    state = page.evaluate("""() => ({
+                        dialogs: document.querySelectorAll('[role="dialog"]').length,
+                        buttons: [...document.querySelectorAll('[role="dialog"] button')]
+                            .map(x => ({text: x.innerText, label: x.getAttribute('aria-label'),
+                                       testid: x.getAttribute('data-testid')})),
+                        text: (document.querySelector('[role="dialog"]')?.innerText || '').slice(0, 700)
+                    })""")
+                    print("PROFILE_AVATAR_DIALOG", json.dumps(state, ensure_ascii=False), flush=True)
+                    apply_button = page.locator('[data-testid="applyButton"]')
+                    if not apply_button.count():
+                        apply_button = page.locator('[role="dialog"] button').filter(
+                            has_text="应用")
+                    if not apply_button.count():
+                        return {"ok": False, "stage": "avatar_crop", "note": "未找到头像应用按钮",
+                                "dialog": state}
+                    if apply_button.first.is_disabled():
+                        return {"ok": False, "stage": "avatar_crop", "note": "头像应用按钮不可用",
+                                "dialog": state}
+                    apply_button.first.click()
+                    P.sleep(4000)
+                save = page.locator('[data-testid="Profile_Save_Button"]')
+                if not save.count():
+                    return {"ok": False, "stage": "save", "note": "未找到资料保存按钮"}
+                if save.is_disabled():
+                    return {"ok": False, "stage": "save", "note": "资料保存按钮不可用"}
+                save.click()
+                P.sleep(2500)
+                # Premium 确认框不是 [role=dialog]（2026-11-09 实证），直接按文本节点
+                # 找“保存更改”容器内的保存按钮；不能把表单回显当成功。
+                confirmed = page.evaluate("""() => {
+                    const holders = [...document.querySelectorAll('body *')].filter(el =>
+                        [...el.childNodes].some(n => n.nodeType === 3
+                            && (n.textContent || '').includes('保存更改')));
+                    let node = holders[holders.length - 1];
+                    for (let up = 0; node && up < 5; up++) {
+                        const btn = [...node.querySelectorAll('button')].find(b =>
+                            (b.innerText || '').trim() === '保存' && !b.disabled);
+                        if (btn) { btn.click(); return {clicked: true, up}; }
+                        node = node.parentElement;
+                    }
+                    return {clicked: false};
+                }""")
+                P.sleep(7000)
+                still_confirming = page.evaluate(
+                    "() => (document.body.innerText || '').includes('保存更改')")
+                result = {"ok": not still_confirming, "url": page.url,
+                          "confirmed": confirmed,
+                          "display_name": page.locator('input[name="displayName"]').input_value()
+                          if page.locator('input[name="displayName"]').count() else display_name,
+                          "toast": P.read_toast(page),
+                          "text": page.evaluate(
+                              "() => (document.body.innerText || '').slice(0, 700)")}
+                log_event("profile", resident.account, action="update",
+                          display_name=display_name, avatar=bool(avatar_path),
+                          ok=True, toast=result["toast"])
+                return result
+            except Exception as e:
+                log_event("profile", resident.account, action="updateError",
+                          note=f"{type(e).__name__}: {e}"[:160])
+                return {"ok": False, "error": f"{type(e).__name__}: {e}"[:180]}
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+    box = resident.submit_browser_task(impl, timeout=150)
+    return box.get("result") or {"ok": False, "error": box.get("error", "browser_task_failed")}
 
 
 def _parse(iso):
