@@ -51,7 +51,8 @@ class Tickets:
     def get(self, tid):
         return _load_json_fail_closed(self._path(tid))
 
-    def decide(self, tid, approve: bool, by: str, edited_text: str | None = None) -> dict:
+    def decide(self, tid, approve: bool, by: str, edited_text: str | None = None,
+               reason: str = "", note: str = "") -> dict:
         """人审决定：approve=通过（可带改稿，改稿后仍需过质量门）。
         锁内读-判-写（review 中4：sweep 与 worker 双副本竞态的封堵）"""
         with file_lock(self._path(tid)):
@@ -78,10 +79,30 @@ class Tickets:
                 doc["payload"]["text"] = clean(edited_text)[0]
                 doc["edited"] = True
             if not approve:
+                from feedback import normalize_reason
+                doc["feedback"] = {"label": normalize_reason(reason), "note": note[:300],
+                                   "by": by, "at": _now()}
                 self._release_once(doc)  # 驳回即释放预留
             _atomic_write(self._path(tid), doc)
         log_event("tickets", self.ledger.account, action="approve" if approve else "reject",
-                  ticket=tid, by=by)
+                  ticket=tid, by=by, reason=(doc.get("feedback") or {}).get("label", ""))
+        return doc
+
+    def cancel(self, tid, by: str, note: str = "") -> dict:
+        """运营者取消待审票；已批准/执行中/终局不可借此绕过执行语义。"""
+        with file_lock(self._path(tid)):
+            doc = self.get(tid)
+            if doc is None:
+                raise TicketError(f"票据不存在: {tid}")
+            if doc.get("status") != "pending_review":
+                raise TicketError(f"仅待审票可取消，当前 {doc.get('status')}")
+            doc["status"] = "cancelled"
+            doc["cancelled_at"] = _now()
+            doc["cancelled_by"] = by
+            doc["cancel_note"] = note[:300]
+            self._release_once(doc)
+            _atomic_write(self._path(tid), doc)
+        log_event("tickets", self.ledger.account, action="cancel", ticket=tid, by=by)
         return doc
 
     def expire(self, tid) -> dict:

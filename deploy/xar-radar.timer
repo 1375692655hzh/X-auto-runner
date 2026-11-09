@@ -1,0 +1,11 @@
+[Unit]
+Description=Run anonymous X health radar twice daily
+
+[Timer]
+OnCalendar=*-*-* 08:20:00
+OnCalendar=*-*-* 18:20:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

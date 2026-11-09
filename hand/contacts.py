@@ -92,6 +92,26 @@ class Contacts:
                 p["tier"] = "normal"
             self.save()
 
+    def get(self, handle: str) -> dict:
+        with file_lock(self.path):
+            self._load()
+            try:
+                import copy
+                return copy.deepcopy(self._p(handle))
+            except ValueError:
+                return {}
+
+    def set_they_follow(self, handle: str, they: bool = True):
+        """新关注通知回填 they_follow；只有双方关注都确认才升互关档。"""
+        with file_lock(self.path):
+            self._load()
+            p = self._p(handle)
+            p["they_follow"] = they
+            p["updated_at"] = datetime.now().isoformat()[:19]
+            if they and p.get("we_follow") and p["tier"] == "normal":
+                p["tier"] = "mutual"
+            self.save()
+
     # ── 熟络度（butcher 借入：累计互动计数轴） ──
     def familiar(self, handle: str) -> str:
         with file_lock(self.path):

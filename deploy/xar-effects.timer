@@ -1,0 +1,10 @@
+[Unit]
+Description=Sample X post effects every 30 minutes
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

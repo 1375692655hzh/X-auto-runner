@@ -53,6 +53,8 @@ class Bot:
         self.commander_whitelist = qcfg.get("commander_whitelist") or []
         self.commander_claim = bool(qcfg.get("commander_claim", False))
         self._pause_armed = {}   # openid -> 停 指令的确认窗口起点
+        self.ops_cfg = cfg.get("ops") or {}
+        self._last_ops_check = 0
 
     # ── 鉴权 ──
     def ensure_token(self):
@@ -128,30 +130,75 @@ class Bot:
             except Exception:
                 notified = {}
             rows = Tickets(Ledger(self.account)).list_open()
+            changed = False
             if first:
                 # 启动时不补推历史待审，避免旧稿批量轰炸；只跟踪启动后的新票
                 for d in rows:
                     if d["id"] not in notified:
                         notified[d["id"]] = "baseline"
-                _atomic_write(path, notified)
-                return
-            changed = False
-            for d in rows:
-                tid = d.get("id")
-                if not tid or notified.get(tid):
-                    continue
-                p = d.get("payload") or {}
-                body = p.get("text") or ""
-                text = (f"我想发 {tid}\n\n正文：\n{body}\n\n"
-                        f"回复「发{tid}」发布；「驳{tid}」放弃。\n"
-                        f"也可以直接说：把{tid}改得更自然/删掉某段/换个角度。\n"
-                        f"回复「票 {tid}」看原始素材与主脑立论。")
-                if self.reply(oid, text, None):
-                    notified[tid] = "sent"
-                    changed = True
-                    log_event("qqbot", self.account, action="notify", ticket=tid)
+                        changed = True
+            else:
+                for d in rows:
+                    tid = d.get("id")
+                    if not tid or notified.get(tid):
+                        continue
+                    p = d.get("payload") or {}
+                    body = p.get("text") or ""
+                    text = (f"我想发 {tid}\n\n正文：\n{body}\n\n"
+                            f"回复「发{tid}」发布；「驳{tid} 标签 备注」放弃。\n"
+                            f"也可以直接说：把{tid}改得更自然/删掉某段/换个角度。\n"
+                            f"回复「票 {tid}」看原始素材与审核。")
+                    if self.reply(oid, text, None):
+                        notified[tid] = "sent"
+                        changed = True
+                        log_event("qqbot", self.account, action="notify", ticket=tid)
+            if self._ops_alerts(oid, notified):
+                changed = True
             if changed:
                 _atomic_write(path, notified)
+
+    def _ops_alerts(self, oid, notified):
+        """低频运营告警：auto 熔断按原因去重，token 日超阈按日去重。"""
+        if time.time() - self._last_ops_check < 300:
+            return False
+        self._last_ops_check = time.time()
+        changed = False
+        try:
+            c = json.loads((STATE_DIR / "news-auto-circuit.json").read_text(encoding="utf-8"))
+            reason = str(c.get("reason") or "blocked")
+            key = "alert:auto:" + reason
+            if c.get("blocked") and not notified.get(key):
+                if self.reply(oid, f"⚠️ 资讯 auto 已熔断：{reason}\n新资讯转为人工审核；现有待审稿不受影响。", None):
+                    notified[key] = "sent"
+                    changed = True
+        except Exception:
+            pass
+        try:
+            limit = int(self.ops_cfg.get("daily_token_alert", 2000000))
+        except (TypeError, ValueError):
+            limit = 2000000
+        if limit > 0:
+            day = datetime.now().strftime("%Y-%m")
+            log = STATE_DIR / f"log-{day}.jsonl"
+            total = 0
+            try:
+                today = datetime.now().strftime("%Y-%m-%d")
+                with log.open(encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            row = json.loads(line)
+                            if row.get("action") == "chat" and str(row.get("at", "")).startswith(today):
+                                total += int(row.get("prompt_tokens") or 0) + int(row.get("completion_tokens") or 0)
+                        except Exception:
+                            continue
+            except FileNotFoundError:
+                pass
+            key = "alert:tokens:" + datetime.now().strftime("%Y-%m-%d")
+            if total >= limit and not notified.get(key):
+                if self.reply(oid, f"⚠️ 今日 LLM token 已达 {total:,}（告警线 {limit:,}），请检查任务量与供应商。", None):
+                    notified[key] = "sent"
+                    changed = True
+        return changed
 
     # ── 指挥官白名单 ──
     def is_commander(self, openid) -> bool:
@@ -200,12 +247,12 @@ class Bot:
         tk = Tickets(led)
         try:
             if t in ("帮助", "help", "HELP", "/help"):
-                self.reply(openid, "指令：\n票 —— 待审列表\n票 <id> —— 资讯原始信息卡\n发/驳 <id> —— 批准/放弃（可不带空格）\n"
+                self.reply(openid, "指令：\n票 —— 待审列表\n票 <id> —— 资讯原始信息卡\n发 <id> —— 批准；驳 <id> [标签] [备注] —— 驳回留反馈\n取消 <id> —— 取消待审票\n"
                                    "把 <id> 改成… —— 主脑按自然语言改稿并复审\n"
-                                   "发帖 <正文> —— 人工直发（过质量门）\n"
+                                   "发帖 <正文> / 回复 <帖子ID> <正文> —— 人工写动作\n"
                                    "改 <id> <新正文> —— 改后发\n驳 <id> —— 驳回\n"
                                    "关注/取关 <handle> —— 人工关注操作\n"
-                                   "状态 —— 工位/账本\n报 —— 今日报告\n"
+                                   "状态 —— 工位/账本\n报 —— 今日报告\n反馈/效果 —— 近7天摘要\n"
                                    "池 —— 互动账号池\n互关/大V/解黑 <handle> —— 设档\n"
                                    "黑 <handle> <原因> —— 拉黑\n停 —— 急停(需二次确认)", msg_id)
             elif t == "票":
@@ -283,10 +330,20 @@ class Bot:
                 tk.decide(parts[0], True, by=f"qq:{openid[-6:]}", edited_text=parts[1])
                 r = self.xc("POST", "/execute", tk.get(parts[0])["payload"])
                 self.reply(openid, f"{parts[0]} 改后执行:{r.get('status') or r}", msg_id)
-            elif re.match(r"^驳\s*\S+$", t):
-                tid = re.sub(r"^驳\s*", "", t).strip()
-                tk.decide(tid, False, by=f"qq:{openid[-6:]}")
-                self.reply(openid, f"{tid} 已驳回（额度已释放）", msg_id)
+            elif re.match(r"^驳\s*\S+", t):
+                m = re.match(r"^驳\s*(\S+)(?:\s+(\S+)(?:\s+([\s\S]*))?)?$", t)
+                tid, label, note = m.group(1), m.group(2) or "", m.group(3) or ""
+                tk.decide(tid, False, by=f"qq:{openid[-6:]}", reason=label, note=note)
+                doc = tk.get(tid)
+                self.reply(openid, f"{tid} 已驳回（{(doc.get('feedback') or {}).get('label')}，额度已释放）", msg_id)
+            elif t.startswith("取消 "):
+                parts = t.split(None, 2)
+                if len(parts) < 2:
+                    self.reply(openid, "用法：取消 <id> [备注]", msg_id)
+                    return
+                tk.cancel(parts[1], by=f"qq:{openid[-6:]}",
+                          note=parts[2] if len(parts) > 2 else "")
+                self.reply(openid, f"{parts[1]} 已取消，未执行，额度已释放", msg_id)
             elif t == "状态":
                 h = self.xc("GET", "/health")
                 l = self.xc("GET", "/ledger")
@@ -335,6 +392,33 @@ class Bot:
                         self.reply(openid, f"@{who.lstrip('@')} → 黑名单（不互动）", msg_id)
                 except ValueError as e:
                     self.reply(openid, f"失败: {e}", msg_id)
+            elif t.startswith("回复 "):
+                parts = t.split(None, 2)
+                if len(parts) < 3 or not parts[1].isdigit():
+                    self.reply(openid, "用法：回复 <帖子ID> <正文>", msg_id)
+                    return
+                sid, body = parts[1], parts[2].strip()
+                detail = self.xc("POST", "/read/post", {"status_id": sid})
+                if not detail.get("post"):
+                    self.reply(openid, "原帖读取失败，未创建回复", msg_id)
+                    return
+                author = detail["post"].get("author") or ""
+                if not author:
+                    self.reply(openid, "原帖作者读取失败，未创建回复", msg_id)
+                    return
+                iid = f"manual-r-{int(time.time())}"
+                payload = {"kind": "reply", "intent_id": iid, "text": body,
+                           "status_id": sid, "post_url": f"https://x.com/{author}/status/{sid}",
+                           "target_handle": author,
+                           "target_len": len(detail["post"].get("text") or ""),
+                           "rationale": "运营者 QQ 人工回复；线程转人工接管"}
+                r = self.xc("POST", "/execute", payload)
+                if r.get("status") == "pending_review":
+                    tk.decide(iid, True, by="qq:运营者人工回复")
+                    from inbox import InboxState
+                    InboxState(self.account).register(sid, "human", iid)
+                    r = self.xc("POST", "/execute", payload)
+                self.reply(openid, f"{iid} 回复结果:{r.get('status') or json.dumps(r, ensure_ascii=False)[:120]}", msg_id)
             elif t.startswith("发帖 "):
                 # 人工帖（#2 人工输入→发布器）：开票→运营者自动批→立即执行；质量门照过
                 text = t[3:].strip()
@@ -388,6 +472,13 @@ class Bot:
                     self.reply(openid, f"被拒:{d.get('code')} {d.get('detail', '')[:80]}", msg_id)
                 else:
                     self.reply(openid, f"结果:{json.dumps(r, ensure_ascii=False)[:120]}", msg_id)
+            elif t == "反馈":
+                from feedback import summary_text
+                self.reply(openid, summary_text(self.account, 7), msg_id)
+            elif t == "效果":
+                from effects import summary
+                s = summary(self.account, 7)
+                self.reply(openid, s.get("text") or json.dumps(s, ensure_ascii=False)[:1600], msg_id)
             elif t == "报":
                 # P4-3：优先 LLM 日推报告（cognitive 落 state/daily-report-*.md），无则回落快照
                 rp = sorted(STATE_DIR.glob("daily-report-*.md"))

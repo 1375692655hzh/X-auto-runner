@@ -507,6 +507,38 @@ def collect_posts(page, limit=20):
         return []
 
 
+def collect_notifications(page, limit=30):
+    """通知页结构化读取；不点击、不写消费状态，业务去重在 inbox.py。"""
+    js = """(limit) => {
+      const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+      let nodes = [...document.querySelectorAll('[data-testid="cellInnerDiv"]')];
+      if (!nodes.length) nodes = [...document.querySelectorAll('article')];
+      const excluded = new Set(['home','explore','notifications','messages','i','search','settings','compose']);
+      return nodes.slice(0, limit).map(n => {
+        const text = clean(n.innerText).slice(0, 2500);
+        const links = [...n.querySelectorAll('a[href]')].map(a => a.getAttribute('href') || '');
+        const sl = links.find(h => /\\/status\\/\\d+/.test(h)) || '';
+        const sid = (sl.match(/\\/status\\/(\\d+)/) || [])[1] || '';
+        let actor = '';
+        const un = n.querySelector('[data-testid="User-Name"] a[href^="/"]');
+        const candidates = [un ? un.getAttribute('href') : '', ...links];
+        for (const href of candidates) {
+          const m = (href || '').match(/^\\/([A-Za-z0-9_]{1,15})\\/?(?:$|\\?)/);
+          if (m && !excluded.has(m[1].toLowerCase())) { actor = m[1].toLowerCase(); break; }
+        }
+        const kind = /关注了你|followed you/i.test(text) ? 'follow'
+          : /回复了你|replied to/i.test(text) ? 'reply'
+          : /点赞|liked your/i.test(text) ? 'like'
+          : sid ? 'mention' : 'other';
+        return {kind, actor, status_id: sid, text};
+      }).filter(e => e.text || e.status_id);
+    }"""
+    try:
+        return page.evaluate(js, limit) or []
+    except Exception:
+        return []
+
+
 # ── 动作管线 ──────────────────────────────────────────────
 def reply_pipeline(page, entry):
     """executor.js:278 replyToPost 全管线。entry: {post_url, status_id, text, target_handle?, target_len?}
@@ -610,10 +642,109 @@ def unfollow_user(page, handle):
             else {"ok": False, "unknown": True, "note": "取关未确认"})
 
 
-def post_tweet(page, text):
-    """executor.js:411：compose 页；C3 语义分叉（发过/already=重复非新发）
-    2026-10-27 实证：浏览器冷启动直奔 compose 弹窗时开时不开——第 2 轮前先回 home
-    热身（等 feed 渲染）再进 compose，与取证脚本同款打法。"""
+def attach_media(page, paths):
+    """compose 弹窗挂 1-4 张本地图；任一失败即中止，绝不发缺图残缺帖。"""
+    files = [str(p) for p in (paths or [])][:4]
+    if not files:
+        return True
+    inp = page.query_selector('[role="dialog"] input[type="file"]') \
+        or page.query_selector('input[data-testid="addMediaFileInput"]')
+    if not inp:
+        return False
+    inp.set_input_files(files)
+    ready_at = -1
+    for i in range(60):
+        sleep(1500)
+        state = page.evaluate("""(want) => {
+            const dlg = document.querySelector('[role="dialog"]');
+            if (!dlg) return {ok:false, imgs:false};
+            const bs = [...dlg.querySelectorAll('[data-testid="tweetButton"]')];
+            const b = bs[bs.length - 1];
+            const imgs = dlg.querySelectorAll('img[src^="blob:"], [data-testid="mediaImage"] img').length >= want;
+            return {ok:!!b && !b.disabled && b.getAttribute('aria-disabled') !== 'true', imgs};
+        }""", len(files))
+        if state.get("ok") and state.get("imgs"):
+            return True
+        if state.get("ok") and ready_at < 0:
+            ready_at = i
+    if ready_at >= 0:
+        sleep(3000)
+        return True
+    return False
+
+
+def _submit_post(page, dry, note=""):
+    if dry:
+        return {"ok": True, "note": "dry_ready（未点击发布）" + note}
+    r = submit_and_confirm(page)
+    if r is not True:
+        if r == "unknown":
+            return {"ok": False, "unknown": True}
+        if r == "disabled":
+            return {"ok": False, "note": f"发布按钮不可点(框长{box_len(page)}——超限/未落字)"}
+        return {"ok": False, "note": "点击后15s无成功气泡"}
+    toast = read_toast(page) or ""
+    if re.search(r"发过|already", toast, re.I):
+        return {"ok": True, "note": "已存在（重复，非本次新发）"}
+    return {"ok": True, "note": "新发" + note}
+
+
+def post_quote(page, text, quoted_status_id, media_paths=None, dry=False):
+    """引用唯一正路：原帖→转推→引用菜单；compose/post/<id> 与 intent?url 均不可靠。"""
+    sid = str(quoted_status_id or "")
+    if not re.fullmatch(r"\d+", sid):
+        return {"ok": False, "note": "quoted_status_id非法"}
+    url = f"https://x.com/i/status/{sid}"
+    if not goto_feed(page, url, 2, sid):
+        return {"ok": False, "note": "引用原帖页加载失败"}
+    art = find_article_by_status(page, sid)
+    if not art:
+        return {"ok": False, "note": "按statusId未找到引用原帖"}
+    try:
+        art.scroll_into_view_if_needed(timeout=10000)
+    except Exception:
+        pass
+    sleep(1200)
+    rt = art.query_selector('[data-testid="retweet"]')
+    if not rt:
+        return {"ok": False, "note": "转推按钮未找到"}
+    try:
+        human_click(page, rt)
+    except Exception:
+        # 贴纸/动效导致的可见性抖动只允许降级一次：直接派发点击，仍走真实 UI 菜单
+        try:
+            rt.dispatch_event("click")
+        except Exception:
+            return {"ok": False, "note": "转推按钮不可点击"}
+    sleep(1500)
+    sleep(1200)
+    clicked = page.evaluate("""() => {
+        const q = [...document.querySelectorAll('[role="menuitem"]')]
+            .find(el => /引用|^quote/i.test((el.textContent || '').trim()));
+        if (!q) return false;
+        q.click(); return true;
+    }""")
+    if not clicked:
+        return {"ok": False, "note": "引用菜单项未找到"}
+    try:
+        page.wait_for_selector(SEL["reply_box"], timeout=12000)
+    except Exception:
+        pass
+    sleep(2500)
+    if not page.query_selector(SEL["reply_box"]):
+        return {"ok": False, "note": "引用编辑框未出现"}
+    if not type_text(page, text):
+        return {"ok": False, "note": "引用正文输入失败"}
+    sleep(800)
+    if media_paths and not attach_media(page, media_paths):
+        return {"ok": False, "note": "引用帖挂图失败/处理超时"}
+    return _submit_post(page, dry, "·引用帖")
+
+
+def post_tweet(page, text, media_paths=None, quoted_status_id=None, dry=False):
+    """普通/多图/引用统一 post 入口；dry 只准备草稿，不点击发布。"""
+    if quoted_status_id:
+        return post_quote(page, text, quoted_status_id, media_paths, dry)
     box = None
     for attempt in range(2):
         try:
@@ -624,11 +755,11 @@ def post_tweet(page, text):
             page.wait_for_selector(SEL["reply_box"], timeout=20000)
         except Exception:
             pass
-        sleep(2500)  # 等弹窗动画稳定
+        sleep(2500)
         box = page.query_selector(SEL["reply_box"])
         if box:
             break
-        if attempt == 0:  # 热身：home 等 feed 渲染后再试一轮 compose
+        if attempt == 0:
             try:
                 page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60000)
                 for _ in range(6):
@@ -642,17 +773,9 @@ def post_tweet(page, text):
     if not type_text(page, text):
         return {"ok": False, "note": "输入失败"}
     sleep(800)
-    r = submit_and_confirm(page)  # compose 弹窗与回复共用气泡机制；发帖不传 sid（无父帖）
-    if r is not True:
-        if r == "unknown":
-            return {"ok": False, "unknown": True}
-        if r == "disabled":
-            return {"ok": False, "note": f"发布按钮不可点(框长{box_len(page)}——超限/未落字)"}
-        return {"ok": False, "note": "点击后15s无成功气泡"}
-    toast = read_toast(page) or ""
-    if re.search(r"发过|already", toast, re.I):
-        return {"ok": True, "note": "已存在（重复，非本次新发）"}
-    return {"ok": True, "note": "新发"}
+    if media_paths and not attach_media(page, media_paths):
+        return {"ok": False, "note": "挂图失败/图片处理超时，未发布"}
+    return _submit_post(page, dry)
 
 
 def maintain_dwell(page, entry):

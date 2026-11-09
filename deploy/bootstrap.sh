@@ -49,10 +49,12 @@ if [ "${SWAP_KB:-0}" -lt 1500000 ]; then
 fi
 
 echo "== [7/7] systemd 单元（安装但不启用；启用须实例配置校验通过） =="
-for u in xar-resident.service xar-core.service xar-watchdog.service xar-watchdog.timer \
+for u in xar-resident.service xar-watchdog.service xar-watchdog.timer \
          xar-health.service xar-health.timer xar-browse.service xar-browse.timer \
          xar-verify.service xar-verify.timer xar-qqbot.service \
-         xar-heartbeat.service xar-heartbeat.timer; do
+         xar-heartbeat.service xar-heartbeat.timer xar-news-auto.service xar-news-auto.timer \
+         xar-report.service xar-report.timer xar-effects.service xar-effects.timer \
+         xar-radar.service xar-radar.timer; do
   [ -f "$HERE/$u" ] && cp "$HERE/$u" /etc/systemd/system/
 done
 systemctl daemon-reload

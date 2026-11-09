@@ -231,6 +231,100 @@ def _harvest(account, posts):
 
 
 # ── 场景执行 ──
+def _try_inbox(llm, account, handle, st, pool):
+    """统一通知入口：回复/提及分场景起草；新关注只出回关待审票。
+    每轮最多一张票，人工接管线程不自动续回。"""
+    from inbox import InboxState, normalize_events
+    r = xc("POST", "/read/notifications", {"limit": 30}, timeout=150)
+    if r.get("error") or r.get("_http") or r.get("_err"):
+        log_event("cognitive", account, action="inboxAbort", note=str(r)[:160])
+        return False
+    ib = InboxState(account)
+    events = [e for e in normalize_events(r.get("notifications"), handle)
+              if not ib.consumed(e["notification_id"])]
+    for e in [x for x in events if x["kind"] in ("reply", "mention")]:
+        nid, sid, author = e["notification_id"], e["status_id"], e["actor"]
+        if not sid or not author or pool.tier(author) == "blacklist":
+            ib.mark_consumed(nid)
+            continue
+        conv = ib.conversation(sid)
+        if conv.get("origin") == "human":
+            ib.mark_consumed(nid)
+            log_event("cognitive", account, action="humanThreadSkip", status_id=sid)
+            continue
+        detail = xc("POST", "/read/post", {"status_id": sid}, timeout=120)
+        if detail.get("error") or not detail.get("post"):
+            # 读取失败不烧通知；本轮终止，避免旧回复路由对同一评论再开票
+            log_event("cognitive", account, action="inboxReadRetry", status_id=sid)
+            return True
+        parent = detail["post"]
+        if (parent.get("author") or "").lower() == handle.lower():
+            scene = "reply-original"
+        elif pool.tier(author) == "mutual":
+            scene = "reply-mutual"
+        elif conv:
+            scene = "reply-visit"
+        else:
+            ib.mark_consumed(nid)  # 无上下文的陌生提及不强行回复
+            continue
+        slots = {"target_author": author, "target_post": parent.get("text") or "",
+                 "thread_context": e.get("text") or "", "relation_tier": pool.relation_slot(author),
+                 "recent_history": "\n".join(f"· {t}" for t in recent_history())}
+        text, skipped = _draft_scene(llm, scene, slots, "reply", 1800)
+        if skipped:
+            ib.mark_consumed(nid)
+            continue
+        iid = f"cog-i-{nid}"
+        res = xc("POST", "/execute", {
+            "kind": "reply", "intent_id": iid, "text": text, "status_id": sid,
+            "post_url": f"https://x.com/i/web/status/{sid}", "target_handle": author,
+            "target_len": len(parent.get("text") or ""), "casual": scene != "reply-original",
+            "rationale": f"通知回复（{scene}）：@{author}"}, timeout=120)
+        status = res.get("status")
+        if status in ("pending_review", "approved", "done", "unknown", "failed"):
+            ib.mark_consumed(nid)
+            ib.register(sid, "automation", iid)
+            pool.record_their(author)
+            pool.salutation_used(text)
+            log_event("cognitive", account, action="ticket", scene=scene,
+                      ticket=res.get("ticket_id") or iid, status=status)
+            return True
+        code = (res.get("denied") or {}).get("code")
+        if code in ("CAP_EXHAUSTED", "WORKSTATION_DOWN", "QUEUE_TIMEOUT"):
+            # 可恢复拒因保留通知并停止本轮，防止 _try_reply 对同一条重复起草
+            log_event("cognitive", account, action="inboxRetry", scene=scene, code=code)
+            return True
+        ib.mark_consumed(nid)
+        log_event("cognitive", account, action="deny", scene=scene, note=str(res)[:240])
+
+    for e in [x for x in events if x["kind"] == "follow"]:
+        nid, author = e["notification_id"], e["actor"]
+        if not author:
+            ib.mark_consumed(nid)
+            continue
+        person = pool.get(author)
+        pool.set_they_follow(author, True)
+        if person.get("we_follow") or person.get("tier") == "blacklist":
+            ib.mark_consumed(nid)
+            continue
+        iid = f"cog-f-{nid}"
+        res = xc("POST", "/execute", {
+            "kind": "follow", "intent_id": iid, "target_handle": author,
+            "rationale": "条件回关建议：收到新关注通知，未关注且非黑名单"}, timeout=120)
+        status = res.get("status")
+        if status in ("pending_review", "approved", "done", "unknown", "failed"):
+            ib.mark_consumed(nid)
+            log_event("cognitive", account, action="followbackTicket",
+                      ticket=res.get("ticket_id") or iid, status=status)
+            return True
+        code = (res.get("denied") or {}).get("code")
+        if code in ("CAP_EXHAUSTED", "WORKSTATION_DOWN", "QUEUE_TIMEOUT"):
+            log_event("cognitive", account, action="inboxRetry", scene="followback", code=code)
+            return True
+        ib.mark_consumed(nid)
+    return False
+
+
 def _try_reply(llm, account, handle, st, pool):
     """#4 reply-original：最新原创帖（≤48h）下未处理的评论 → 回复票
     P4-4：① 招呼类评论走模板库旁路（butcher 光速回复路，零 LLM）
@@ -295,6 +389,8 @@ def _try_reply(llm, account, handle, st, pool):
         if src == "模板库":   # 名额在票据成立后才烧（deny 不烧，MoA 审查高③）
             Templates(account).mark_used(text, author)
         pool.salutation_used(text)
+        from inbox import InboxState
+        InboxState(account).register(sid, "automation", f"cog-r-{cid[-10:]}")
         log_event("cognitive", account, action="ticket", scene="reply-original",
                   via=src, ticket=r2.get("ticket_id"))
         return True
@@ -358,6 +454,8 @@ def _try_visit(llm, account, st, pool, media_gate):
     if r2.get("status") == "pending_review":
         pool.record_our(h, "comment")   # 冷却自开票起算（防票 pending 期间重复开票）
         pool.salutation_used(text)
+        from inbox import InboxState
+        InboxState(account).register(sid, "automation", f"cog-v-{sid[-10:]}")
         log_event("cognitive", account, action="ticket", scene="comment-mutual-visit",
                   ticket=r2.get("ticket_id"))
         return True
@@ -433,6 +531,8 @@ def _try_hot(llm, account, handle, st, pool, media_gate):
             hot_authors[author] = datetime.now().isoformat()[:19]
             st["hot_authors"] = hot_authors
             pool.salutation_used(text)
+            from inbox import InboxState
+            InboxState(account).register(sid, "automation", f"cog-h-{sid[-10:]}")
             log_event("cognitive", account, action="ticket", scene="comment-hot",
                       ticket=r2.get("ticket_id"))
             return True
@@ -565,12 +665,35 @@ def _draft_report(llm, account, led):
         "健康快照日": snaps[-1].stem if snaps else None,
         "认知心跳累计": int((led.get("_beats") or 0)),
     }
+    token_total = 0
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        with (STATE_DIR / f"log-{datetime.now():%Y-%m}.jsonl").open(encoding="utf-8") as f:
+            for line in f:
+                row = json.loads(line)
+                if row.get("action") == "chat" and str(row.get("at", "")).startswith(today):
+                    token_total += int(row.get("prompt_tokens") or 0) + int(row.get("completion_tokens") or 0)
+    except Exception:
+        pass
+    stats["今日LLM_tokens"] = token_total
     out = llm.chat("report", assemble("report", {"account_stats": json.dumps(stats, ensure_ascii=False, indent=1)}),
                    "执行上述场景任务，输出今日运营报告正文。", max_tokens=3500)
     text = (out or "").strip()
     if not text or text.upper() == "SKIP":
         log_event("cognitive", account, action="reportSkip")
         return False
+    try:
+        from feedback import summary_text
+        text += "\n\n【近7天反馈（票据实数）】\n" + summary_text(account, 7)
+    except Exception:
+        pass
+    try:
+        from effects import summary
+        effect = summary(account, 7)
+        if effect:
+            text += "\n\n【近7天发布效果（只读采样）】\n" + json.dumps(effect, ensure_ascii=False)[:700]
+    except Exception:
+        pass
     day = datetime.now().strftime("%Y-%m-%d")
     (STATE_DIR / f"daily-report-{day}.md").write_text(text, encoding="utf-8")
     log_event("cognitive", account, action="reportDrafted", file=f"daily-report-{day}.md")
@@ -625,7 +748,9 @@ def beat():
         try:
             if (led.get("rolling24h_used", {}).get("reply", 99)
                     < led.get("rolling24h_cap", {}).get("reply", 0)):
-                acted = _try_reply(llm, account, handle, st, pool)
+                acted = _try_inbox(llm, account, handle, st, pool)
+                if not acted:
+                    acted = _try_reply(llm, account, handle, st, pool)
         except Exception as e:
             log_event("cognitive", account, action="replyFail", note=str(e)[:120])
         if not acted:

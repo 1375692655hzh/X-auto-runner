@@ -127,3 +127,17 @@ python /opt/xar/hand/news_auto.py
 ```
 
 状态：`state/news-auto.json`。每小时运行分钟持久化随机；评分失败不标记完成。调度记录保留 72h，已评 ID 48h，事件记忆 7 天。
+
+## auto 收尾、时效与熔断（2026-11-09 功能补全）
+
+- `/execute` 在 auto 下可能同次返回 `done/failed/unknown/approved`；这些全部作为已有票据结局落账，不再误记 `ticket_error` 重试。只有无业务状态的传输/内部错误才允许下拍恢复。
+- auto 授权新增素材年龄：资讯默认 6h、精品文章默认 24h（`news_auto.max_age_hours`）；缺时间、未来时间异常、超龄均回 review。成稿后同 Story 出现新进展也不自动发旧稿。
+- `state/news-auto-circuit.json` 记录 auto 熔断：一次 unknown 或连续两次 failed 后停止新的自动授权，保留人工审核；不自动改实例配置。QQ 按熔断原因去重告警；恢复须人工删除该状态文件并核对原因。
+- 票据反馈支持结构化驳回标签；日报聚合近 7 天驳回原因、人工改稿、执行结局和发布效果采样。反馈只作证据，不自动改提示词、评分权重或预算。
+
+## 发布与互动功能底座（2026-11-09）
+
+- post 支持 1–4 张本地图片和 `quoted_status_id` 引用；媒体只允许 `/tmp` 下 png/jpg/jpeg，校验大小与魔数。`/dry` 带 `browser=true` 可在真页准备草稿，绝不点击发布。
+- 新增 `/read/notifications` 只读入口与 `inbox.py`：统一回复/提及/新关注事件、通知去重和对话归属。人工回复的线程不再自动续回；新关注只生成条件回关待审票。
+- `effects.py` 对 done 的 post/reply/comment 做 T+2/8/24/48h FxTwitter 只读采样；无真实结果 ID 时按公开时间线规范正文唯一匹配，无法确认不采样。聚合计数取每 intent 最新时点，避免累计指标重复相加。
+- 新能力不改变现有预算、活跃窗和审批配置；真实发布仍须单独明确验收。

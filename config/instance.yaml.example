@@ -29,11 +29,23 @@ llm:                        # P4 起填写：按功能分模型（成稿/评论/
   #   fallback_providers:                     # 跨供应商完整 key/端点
   #     - {model: "", api_key: "", base_url: ""}
 
-im:                         # P3 起启用（QQ/NapCat）
+im:                         # QQ 官方机器人 WebSocket/REST（不是 NapCat）
   qq:
     enabled: false
-    bot_qq: 0               # agent 小号
-    commander_whitelist: [] # 允许下指令的 QQ 大号（安全关键，console-settings §10）
+    app_id: ""              # QQ 开放平台机器人 AppID
+    app_secret: ""          # 仅存在本文件（600），禁止写入仓库
+    commander_whitelist: [] # 允许下指令的 QQ openid（安全关键）
+    commander_claim: false  # 白名单为空时是否允许首个发信人认领；生产建议 false
+
+news_auto:
+  mode: review              # review|auto；auto 仅资讯原创，其他动作不受影响
+  structured_gate: shadow   # shadow|enforce；先用真实采纳数据对账再转正
+  max_age_hours: {资讯: 6, 精品文章: 24}  # auto 发布前素材年龄硬上限
+
+ops:
+  daily_token_alert: 2000000  # 今日 prompt+completion token 超阈时 QQ 告警；0=关闭
+  effects:
+    enabled: true            # 只读 FxTwitter 效果采样，不产生 X 写动作
 
 runtime:
   active_window: ["06:30", "24:00"]

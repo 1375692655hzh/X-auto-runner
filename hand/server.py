@@ -18,6 +18,7 @@
 import json
 import os
 import queue
+import re
 import secrets
 import sys
 import threading
@@ -34,6 +35,36 @@ from quality import check as quality_check  # noqa: E402
 
 WRITE_KINDS = {"post", "reply", "comment", "like", "follow", "unfollow"}
 PRIORITY = {"post": 0, "reply": 1, "comment": 1, "like": 2, "follow": 2, "unfollow": 2, "browse": 3}
+
+
+def _validate_post_options(intent):
+    """多图/引用只作为 post 的可选载荷；本地媒体白名单+魔数，杜绝任意URL/路径。"""
+    kind = intent.get("kind")
+    media = intent.get("media_paths")
+    quoted = intent.get("quoted_status_id")
+    if kind != "post":
+        if media or quoted:
+            raise Deny("BAD_REQUEST", "media_paths/quoted_status_id 仅支持 post")
+        return
+    if media is not None:
+        if not isinstance(media, list) or not (1 <= len(media) <= 4):
+            raise Deny("BAD_REQUEST", "media_paths 须为1-4个本地文件路径")
+        for raw in media:
+            p = Path(str(raw))
+            if p.parent != Path("/tmp") or p.is_symlink() or not p.is_file() \
+                    or p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                raise Deny("BAD_REQUEST", "媒体仅允许 /tmp 下非符号链接的 png/jpg 文件")
+            size = p.stat().st_size
+            if not (1 <= size <= 15 * 1024 * 1024):
+                raise Deny("BAD_REQUEST", f"媒体大小非法: {p.name}")
+            with p.open("rb") as f:
+                head = f.read(12)
+            valid = head.startswith(b"\x89PNG\r\n\x1a\n") if p.suffix.lower() == ".png" \
+                else head.startswith(b"\xff\xd8\xff")
+            if not valid:
+                raise Deny("BAD_REQUEST", f"媒体扩展名与真实格式不符: {p.name}")
+    if quoted is not None and not re.fullmatch(r"\d{5,30}", str(quoted)):
+        raise Deny("BAD_REQUEST", "quoted_status_id 须为数字帖子ID")
 
 
 class Deny(Exception):
@@ -115,6 +146,7 @@ class Gateway:
         kind = intent.get("kind")
         if kind not in WRITE_KINDS:
             raise Deny("BAD_REQUEST", f"未知动作类型: {kind}")
+        _validate_post_options(intent)
         iid = intent.get("intent_id")
         if not iid:
             raise Deny("BAD_REQUEST", "缺 intent_id（幂等键）")
@@ -183,12 +215,44 @@ class Gateway:
         return out[-100:]
 
     def dry_run(self, intent: dict):
-        """过全闸、不落盘、不点击"""
+        """过全闸、不落盘、不点击；browser=true 时只在真实页面准备 post 草稿。"""
         try:
+            intent = {**intent, "dry": True}  # /dry 自身即零副作用，不要求调用方重复传 dry
             kind, iid = self._gates(intent)
+            if not SIMULATE and kind in ("post", "reply", "comment"):
+                intent = self._quality_gate(kind, intent)
+            if intent.get("browser"):
+                if kind != "post":
+                    raise Deny("BAD_REQUEST", "真页 dry 目前仅支持 post")
+                return self._browser_dry_post(intent)
             return {"dry": True, "kind": kind, "would_deny": None}
         except Deny as d:
             return {"dry": True, "would_deny": d.body}
+
+    def _browser_dry_post(self, intent):
+        if self.resident is None or self.resident.ctx is None:
+            raise Deny("WORKSTATION_DOWN", "真页 dry 需要在线工位")
+        import primitives as P
+
+        def impl():
+            with self.resident.browser_lock:
+                page = self.resident.ctx.new_page()
+                try:
+                    r = P.post_tweet(page, intent.get("text") or "",
+                                     media_paths=intent.get("media_paths"),
+                                     quoted_status_id=intent.get("quoted_status_id"), dry=True)
+                    return {"dry": True, "browser": True, "would_deny": None,
+                            "ready": bool(r.get("ok")), "note": r.get("note", "")}
+                finally:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
+        box = self.resident.submit_browser_task(impl, timeout=180)
+        if "result" in box:
+            return box["result"]
+        raise Deny("INTERNAL", f"真页 dry 失败: {box.get('error')}")
 
     def execute(self, intent: dict, timeout=300):
         kind, iid = self._gates(intent)  # Deny 向上抛给 HTTP 层
@@ -349,7 +413,9 @@ class Gateway:
                         # comment=在他人帖下发言，与 reply 同管线（P4-4 接线）
                         r = P.reply_pipeline(page, payload)
                     elif kind == "post":
-                        r = P.post_tweet(page, payload["text"])
+                        r = P.post_tweet(page, payload["text"],
+                                         media_paths=payload.get("media_paths"),
+                                         quoted_status_id=payload.get("quoted_status_id"))
                     elif kind == "like":
                         r = P.like_post(page, payload)
                     elif kind == "follow":
@@ -452,7 +518,7 @@ def make_handler(gw: Gateway, resident):
                     if resident is None or resident.ctx is None:
                         return self._send(503, {"error": "workstation_down"})
                     return self._send(200, _update_profile(resident, body))
-                if self.path in ("/read/timeline", "/read/post", "/read/profile"):
+                if self.path in ("/read/timeline", "/read/post", "/read/profile", "/read/notifications"):
                     if resident is None or resident.ctx is None:
                         return self._send(503, {"error": "workstation_down"})
                     return self._send(200, _read(resident, self.path, body))
@@ -505,6 +571,16 @@ def _read(resident, path, body):
                             label: x.getAttribute('aria-label')})),
                         files: document.querySelectorAll('input[type=file]').length
                     })""")
+                if path == "/read/notifications":
+                    url = "https://x.com/notifications/mentions" \
+                        if body.get("surface") == "mentions" else "https://x.com/notifications"
+                    if not P.goto_feed(page, url, must_have_article=False):
+                        return {"error": "notifications_load_failed"}
+                    P.sleep(3000)
+                    P.human_scroll(page, 500)
+                    P.sleep(1200)
+                    return {"notifications": P.collect_notifications(
+                        page, min(int(body.get("limit", 30)), 50))}
                 if path == "/read/timeline":
                     surface = body.get("surface", "home")
                     url = {"home": "https://x.com/home",

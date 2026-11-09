@@ -19,8 +19,9 @@ from ledger import STATE_DIR, log_event, check_pause, PauseActive, file_lock  # 
 
 STATE_FILE = STATE_DIR / "news-auto.json"
 AUDIT_FILE = STATE_DIR / "news-decisions.jsonl"
-POLICY_BASE = "news-auto-20261105-v13"   # v13: 活跃窗与工位统一（06:30-24:00）
+POLICY_BASE = "news-auto-20261109-v14"   # v14: auto 结果闭环、素材新鲜度与异常熔断
 MAX_PER_HOUR = 5
+CIRCUIT_FILE = STATE_DIR / "news-auto-circuit.json"
 SCORE_MIN = 70
 TIER_ORDER = {"S": 0, "A": 1, "B": 2, "C": 3, "N": 4}
 
@@ -74,10 +75,31 @@ def _hash_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
 
 
+def _news_cfg():
+    try:
+        import yaml
+        return (yaml.safe_load(Path("/etc/xar/instance.yaml").read_text(encoding="utf-8"))
+                or {}).get("news_auto") or {}
+    except Exception:
+        return {}
+
+
+def _max_age_hours(form):
+    """auto 发布前的素材年龄上限；快讯慢文分开，非法值 fail-closed 为更严默认值。"""
+    configured = _news_cfg().get("max_age_hours") or {}
+    default = 6 if form == "资讯" else 24
+    try:
+        value = float(configured.get(form, default))
+        return value if 0 < value <= 168 else default
+    except (TypeError, ValueError):
+        return default
+
+
 def policy_version():
     payload = json.dumps({"base": POLICY_BASE, "window": "-".join(_active_window()[2]),
                           "forms": ["资讯", "精品文章"], "max_per_hour": MAX_PER_HOUR,
-                          "score_min": SCORE_MIN, "score_prompt": SCORE_PROMPT},
+                          "score_min": SCORE_MIN, "score_prompt": SCORE_PROMPT,
+                          "max_age_hours": {f: _max_age_hours(f) for f in ("资讯", "精品文章")}},
                          ensure_ascii=False, sort_keys=True)
     return f"{POLICY_BASE}-{_hash_text(payload)}"
 
@@ -96,13 +118,40 @@ def prompt_version():
 
 def _configured_mode():
     """auto 只能由 /etc/xar/instance.yaml 的 news_auto.mode 显式开启；缺省永远 review。"""
+    return "auto" if str(_news_cfg().get("mode") or "review").lower() == "auto" else "review"
+
+
+def _auto_circuit():
     try:
-        import yaml
-        cfg = yaml.safe_load(Path("/etc/xar/instance.yaml").read_text(encoding="utf-8"))
-        mode = str(((cfg.get("news_auto") or {}).get("mode") or "review")).lower()
-        return "auto" if mode == "auto" else "review"
+        return json.loads(CIRCUIT_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return "review"
+        return {}
+
+
+def _save_circuit(doc):
+    tmp = CIRCUIT_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, CIRCUIT_FILE)
+
+
+def _record_auto_result(ticket, status):
+    """auto 异常只切断新的自动授权，不篡改配置；review 和人工批准仍可继续。"""
+    doc = _auto_circuit()
+    if status == "unknown":
+        doc.update({"blocked": True, "reason": f"{ticket}:unknown",
+                    "updated_at": datetime.now().isoformat()[:19], "consecutive_failed": 0})
+    elif status == "failed":
+        n = int(doc.get("consecutive_failed") or 0) + 1
+        doc.update({"consecutive_failed": n, "updated_at": datetime.now().isoformat()[:19]})
+        if n >= 2:
+            doc.update({"blocked": True, "reason": f"连续{n}次执行失败"})
+    elif status == "done":
+        doc["consecutive_failed"] = 0
+    else:
+        return
+    _save_circuit(doc)
+    log_event("news_auto", "wcixot", action="autoCircuit", ticket=ticket,
+              status=status, blocked=bool(doc.get("blocked")), reason=doc.get("reason", ""))
 
 
 DEFAULT_WINDOW = ("06:30", "24:00")
@@ -146,6 +195,7 @@ def make_mandate(r, story_id, analysis_pack=None):
            "source_forms": ["资讯", "精品文章"], "active_window": _active_window()[2],
            "max_per_hour": MAX_PER_HOUR, "score_min": SCORE_MIN,
            "score": r["score"], "story_id": story_id,
+           "created_at": datetime.now().isoformat()[:19],
            "policy_version": policy_version(), "prompt_version": prompt_version(),
            "auto_execute": mode == "auto"}
     if analysis_pack:
@@ -154,12 +204,38 @@ def make_mandate(r, story_id, analysis_pack=None):
     return out
 
 
+def _parse_source_time(value):
+    text = str(value or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def _story_updated_after_ticket(m):
+    """同 Story 在成稿后出现新进展时，不自动发旧稿，转人工重新判断。"""
+    created = _parse_source_time(m.get("created_at"))
+    if not created:
+        return True
+    for story in _load_state().get("stories") or []:
+        if story.get("story_id") != m.get("story_id"):
+            continue
+        changed = _parse_source_time(story.get("last_at"))
+        return bool(changed and changed > created + timedelta(seconds=2))
+    return False
+
+
 def auto_authorized(intent, now=None):
-    """服务端最终校验：只有当前配置auto且票据满足全部资讯约束才可自动批准。
-    旧review票、缺编辑审核、版本过期、窗口外一律False；新流程无立论合约依赖。"""
+    """服务端最终校验：auto配置、版本、完整素材、编辑accept、活跃窗、素材新鲜度、
+    Story未更新且熔断未触发。任一缺失/异常都回review，不猜、不放行。"""
     if _configured_mode() != "auto" or intent.get("kind") != "post":
         return False
-    if not in_active_window(now):
+    if not in_active_window(now) or _auto_circuit().get("blocked"):
         return False
     m = intent.get("mandate") or {}
     if not (m.get("mode") == "auto" and m.get("auto_execute") is True
@@ -173,12 +249,32 @@ def auto_authorized(intent, now=None):
     except (TypeError, ValueError):
         return False
     nd = intent.get("news_detail") or {}
-    if nd.get("form") not in ("资讯", "精品文章") or nd.get("source_truncated"):
+    form = nd.get("form")
+    if form not in ("资讯", "精品文章") or nd.get("source_truncated"):
         return False
     if not nd.get("source_text") or not nd.get("story_id"):
         return False
+    source_time = _parse_source_time(nd.get("time"))
+    current = now or datetime.now()
+    if source_time is None:
+        return False
+    age = (current - source_time).total_seconds()
+    if age < -900 or age > _max_age_hours(form) * 3600:
+        return False
+    if _story_updated_after_ticket(m):
+        return False
     reviews = intent.get("value_reviews") or {}
     return (reviews.get("editor") or {}).get("decision") == "accept"
+
+
+def _execute_route(res):
+    """执行响应分类：已有票据/执行结局=落账；明确拒绝=终局；其余才可恢复重试。"""
+    status = (res or {}).get("status")
+    if status in ("pending_review", "approved", "done", "failed", "unknown"):
+        return status
+    if (res or {}).get("denied"):
+        return "denied"
+    return "retry"
 
 
 def _audit(action, **fields):
@@ -393,6 +489,8 @@ def _reconcile_tickets(st):
             _audit("ticket_outcome", ticket=tid, status=status,
                    note=str(d.get("note") or d.get("error") or "")[:120])
             known[tid] = status
+            if ((d.get("payload") or {}).get("mandate") or {}).get("mode") == "auto":
+                _record_auto_result(tid, status)
             changed = True
     # 只留最近 300 张票的结局缓存；JSONL 审计本身永久保留
     if len(known) > 300:
@@ -508,8 +606,11 @@ def _score_batch_checked(llm, batch, history, recent_events):
     for row in rows:
         key = str(row.get("key"))
         item = by_key[key]
-        # 标题头用于抓“key复制正确、内容却串到别的候选”的隐蔽串稿
-        if str(row.get("head") or "") != _item_head(item):
+        # 标题头用于抓“key复制正确、内容却串到别的候选”的隐蔽串稿；
+        # 模型常多带 1-2 字，只要标准头是返回头的前缀（规范化空白后）即认可
+        expected_head = re.sub(r"\s+", "", _item_head(item))
+        returned_head = re.sub(r"\s+", "", str(row.get("head") or ""))
+        if not (returned_head.startswith(expected_head) or expected_head.startswith(returned_head)):
             raise ValueError(f"评分标题头串稿:{key}")
         probe = {"item": item, "event": str(row.get("event") or "")}
         if _entity_mismatch(probe):
@@ -563,7 +664,7 @@ def score_items(llm, items, history=None, recent_events=None, batch_size=4):
             results.extend(_score_batch_checked(llm, batch, history or [], recent_events or []))
         except Exception as e:
             if len(batch) == 1:
-                if "主体串稿" in str(e):
+                if "主体串稿" in str(e) or "标题头串稿" in str(e):
                     # 单条仍冲突：可能是源标题/正文错位，也可能模型误读；
                     # 两种都不得发布。明确淘汰而不是让整小时卡死或无限重试。
                     it = batch[0]
@@ -825,13 +926,21 @@ def tick():
                                       "news_detail": news_detail,
                                       "value_reviews": produced["reviews"],
                                       "mandate": make_mandate(r, story_id)}, timeout=120)
-        if res.get("status") == "pending_review":
+        status = _execute_route(res)
+        if status in ("pending_review", "approved", "done", "failed", "unknown"):
+            # auto 会在同一次 /execute 内完成真实动作；这些都不是“开票失败”，
+            # 必须立即记票并停止同票重试。approved=工位不可用后的确定性待重试。
             _audit("ticketed", item_id=it.get("id"), story_id=story_id,
-                   ticket=iid, status="pending_review")
+                   ticket=iid, status=status)
             h.setdefault("ticketed_ids", []).append(iid)
             h.setdefault("drafts", []).append({"ticket": iid, "text": text.strip()})
-            st.setdefault("ticket_status", {})[iid] = "pending_review"
+            st.setdefault("ticket_status", {})[iid] = status
             drafted.append(text.strip())
+            if _configured_mode() == "auto":
+                _record_auto_result(iid, status)
+            log_event("news_auto", "wcixot", action="ticket",
+                      ticket=iid, score=r["score"], status=status)
+            _save_state(st)
         elif res.get("denied"):
             _audit("ticket_denied", item_id=it.get("id"), story_id=story_id,
                    ticket=iid, note=str(res.get("denied"))[:120])
@@ -840,17 +949,13 @@ def tick():
                       ticket=iid, score=r["score"], note=str(res.get("denied"))[:100])
             _save_state(st)
         else:
-            # 网络/内部错误不是业务拒绝：保留本小时进度，同票号下拍重试
+            # 只有无业务状态的传输/内部错误才允许下拍同票号恢复。
             _audit("ticket_error", item_id=it.get("id"), story_id=story_id,
                    ticket=iid, note=str(res)[:120])
             log_event("news_auto", "wcixot", action="ticketError",
                       ticket=iid, note=str(res)[:100])
             _save_state(st)
             return
-        if res.get("status") == "pending_review":
-            log_event("news_auto", "wcixot", action="ticket",
-                      ticket=iid, score=r["score"])
-            _save_state(st)
     h.update({"done": True, "done_at": datetime.now().isoformat()[:19],
               "pending_selection": None, "ticketed": len(h.get("ticketed_ids", []))})
     st["hours"] = {k: v for k, v in hours.items() if _hour_ts(k) >= time.time() - 72 * 3600}

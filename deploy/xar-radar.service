@@ -1,0 +1,8 @@
+[Unit]
+Description=xar-agent anonymous shadowban radar
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/xar/hand
+ExecStart=/opt/xar/venv/bin/python /opt/xar/hand/radar.py
