@@ -551,20 +551,47 @@ def _read(resident, path, body):
 
 
 def _update_profile(resident, body):
-    """本机 Token 资料维护：显示名/头像。只允许运维临时上传的本地图片，
+    """本机 Token 资料维护：显示名/头像/横幅/简介。只允许运维临时上传的本地图片，
     不接受 URL 或任意路径；仍由工位主线程串行操作。蓝V可能进入复审。"""
     import primitives as P
     display_name = str(body.get("display_name") or "").strip()
     avatar_path = body.get("avatar_path")
+    banner_path = body.get("banner_path")
+    bio = str(body.get("bio") or "").strip()
     if display_name and not (1 <= len(display_name) <= 50):
         return {"error": "display_name 长度须为1-50字"}
-    if avatar_path:
-        avatar = Path(str(avatar_path))
-        if avatar.parent != Path("/tmp") or not avatar.is_file() \
-                or avatar.suffix.lower() not in (".png", ".jpg", ".jpeg"):
-            return {"error": "avatar_path 仅允许 /tmp 下的 png/jpg 临时文件"}
-    if not display_name and not avatar_path:
-        return {"error": "未提供 display_name 或 avatar_path"}
+    if bio and len(bio) > 160:
+        return {"error": "bio 长度须为1-160字"}
+    for key, label in (("avatar_path", "avatar_path"), ("banner_path", "banner_path")):
+        p = body.get(key)
+        if p:
+            f = Path(str(p))
+            if f.parent != Path("/tmp") or not f.is_file() \
+                    or f.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                return {"error": f"{label} 仅允许 /tmp 下的 png/jpg 临时文件"}
+    if not display_name and not avatar_path and not banner_path and not bio:
+        return {"error": "未提供 display_name/avatar_path/banner_path/bio"}
+
+    def _apply_crop(page, stage):
+        """头像/横幅上传后的裁剪应用弹窗；无弹窗或按钮不可用时如实报错并附现场。"""
+        state = page.evaluate("""() => ({
+            dialogs: document.querySelectorAll('[role="dialog"]').length,
+            buttons: [...document.querySelectorAll('[role="dialog"] button')]
+                .map(x => ({text: x.innerText, label: x.getAttribute('aria-label'),
+                           testid: x.getAttribute('data-testid')})),
+            text: (document.querySelector('[role="dialog"]')?.innerText || '').slice(0, 700)
+        })""")
+        print(f"PROFILE_{stage.upper()}_DIALOG", json.dumps(state, ensure_ascii=False), flush=True)
+        apply_button = page.locator('[data-testid="applyButton"]')
+        if not apply_button.count():
+            apply_button = page.locator('[role="dialog"] button').filter(has_text="应用")
+        if not apply_button.count():
+            return {"ok": False, "stage": stage, "note": f"未找到{stage}应用按钮", "dialog": state}
+        if apply_button.first.is_disabled():
+            return {"ok": False, "stage": stage, "note": f"{stage}应用按钮不可用", "dialog": state}
+        apply_button.first.click()
+        P.sleep(4000)
+        return None
 
     def impl():
         with resident.browser_lock:
@@ -579,6 +606,23 @@ def _update_profile(resident, body):
                     if field.input_value() != display_name:
                         return {"ok": False, "stage": "display_name",
                                 "note": "显示名写入后回读不一致，未保存"}
+                if banner_path:
+                    banner_button = None
+                    for label in ("添加横幅照片", "编辑横幅照片", "更改横幅照片"):
+                        btn = page.locator(f'[aria-label="{label}"]')
+                        if btn.count():
+                            banner_button = btn.first
+                            break
+                    if banner_button is None:
+                        return {"ok": False, "stage": "banner",
+                                "note": "未找到横幅上传按钮（添加/编辑/更改横幅照片均无）"}
+                    with page.expect_file_chooser(timeout=15000) as chooser:
+                        banner_button.click()
+                    chooser.value.set_files(str(banner_path))
+                    P.sleep(5000)
+                    bad = _apply_crop(page, "banner_crop")
+                    if bad:
+                        return bad
                 if avatar_path:
                     avatar_button = page.locator('[aria-label="添加头像照片"]')
                     if avatar_button.count():
@@ -591,26 +635,17 @@ def _update_profile(resident, body):
                             page.get_by_role("button", name="编辑照片", exact=True).click()
                         chooser.value.set_files(str(avatar_path))
                     P.sleep(5000)
-                    state = page.evaluate("""() => ({
-                        dialogs: document.querySelectorAll('[role="dialog"]').length,
-                        buttons: [...document.querySelectorAll('[role="dialog"] button')]
-                            .map(x => ({text: x.innerText, label: x.getAttribute('aria-label'),
-                                       testid: x.getAttribute('data-testid')})),
-                        text: (document.querySelector('[role="dialog"]')?.innerText || '').slice(0, 700)
-                    })""")
-                    print("PROFILE_AVATAR_DIALOG", json.dumps(state, ensure_ascii=False), flush=True)
-                    apply_button = page.locator('[data-testid="applyButton"]')
-                    if not apply_button.count():
-                        apply_button = page.locator('[role="dialog"] button').filter(
-                            has_text="应用")
-                    if not apply_button.count():
-                        return {"ok": False, "stage": "avatar_crop", "note": "未找到头像应用按钮",
-                                "dialog": state}
-                    if apply_button.first.is_disabled():
-                        return {"ok": False, "stage": "avatar_crop", "note": "头像应用按钮不可用",
-                                "dialog": state}
-                    apply_button.first.click()
-                    P.sleep(4000)
+                    bad = _apply_crop(page, "avatar_crop")
+                    if bad:
+                        return bad
+                if bio:
+                    bio_field = page.locator('textarea[name="description"]')
+                    if not bio_field.count():
+                        return {"ok": False, "stage": "bio", "note": "未找到简介输入框"}
+                    bio_field.fill(bio)
+                    if bio_field.input_value() != bio:
+                        return {"ok": False, "stage": "bio",
+                                "note": "简介写入后回读不一致，未保存"}
                 save = page.locator('[data-testid="Profile_Save_Button"]')
                 if not save.count():
                     return {"ok": False, "stage": "save", "note": "未找到资料保存按钮"}
@@ -640,12 +675,14 @@ def _update_profile(resident, body):
                           "confirmed": confirmed,
                           "display_name": page.locator('input[name="displayName"]').input_value()
                           if page.locator('input[name="displayName"]').count() else display_name,
+                          "bio_set": bool(bio),
                           "toast": P.read_toast(page),
                           "text": page.evaluate(
                               "() => (document.body.innerText || '').slice(0, 700)")}
                 log_event("profile", resident.account, action="update",
                           display_name=display_name, avatar=bool(avatar_path),
-                          ok=True, toast=result["toast"])
+                          banner=bool(banner_path), bio=bool(bio),
+                          ok=result["ok"], toast=result["toast"])
                 return result
             except Exception as e:
                 log_event("profile", resident.account, action="updateError",
