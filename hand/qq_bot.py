@@ -215,14 +215,21 @@ class Bot:
                         except Exception:
                             continue
                         if row.get("action") == "chainFail":
-                            # 全链失败=该职能彻底无模型可用，任一即报（按小时去重）
+                            # 全链失败=该职能彻底无模型可用，任一即报。
+                            # 按事故指纹去重（fn+错误摘要，按天）：同一起事故只叫一次，
+                            # 不再因小时键滚动而重播（2026-11-10 回声事故）；新事故秒叫
                             try:
                                 at = datetime.fromisoformat(str(row.get("at", "")))
                                 fresh = (now_utc - at).total_seconds() <= 3600
                             except Exception:
                                 fresh = True
                             if fresh:
-                                cf_key = "alert:chainFail:" + datetime.now().strftime("%Y-%m-%d-%H")
+                                import hashlib
+                                fp = hashlib.md5((str(row.get("fn")) + "|"
+                                                  + str(row.get("note") or "")[:80]).encode()
+                                                 ).hexdigest()[:8]
+                                cf_key = ("alert:chainFail:"
+                                          + datetime.now().strftime("%Y-%m-%d") + ":" + fp)
                                 if not notified.get(cf_key) and self.reply(
                                         oid, f"🚨 LLM 全供应商链失败（{row.get('fn')}）："
                                              f"{str(row.get('note') or '')[:150]}\n"
