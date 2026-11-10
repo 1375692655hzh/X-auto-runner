@@ -27,10 +27,16 @@ llm:                        # 2026-11-10 换链后结构：所有职能统一走
     fallback_providers:
     - {model: "", api_key: "", base_url: ""}
     - {model: "", api_key: "", base_url: ""}
-  # decision 通道已移除（2026-11-10）：阿里 decision-model-preview 走 systemone 专用
-  # 协议（/compatible-mode/v1/systemone，state+questions 结构），不支持 chat/completions，
-  # 与生成式判定（评分JSON/标的why推理）不兼容。端点实测可用；分类型判定（值不值得
-  # 互动/名企门槛等 noul/score 问题）迁过去是后续可选项，需先写协议适配层。
+  # decision 通道：dormant 资产保留（2026-11-10 运营裁定：配置应该在，用不用按设计决定）。
+  # 阿里 decision-model-preview 走 systemone 专用协议（POST {base_url}/systemone，
+  # body 为 state+questions，输出 choice/noul/score 结构化判定），不支持 chat/completions。
+  # llm.conf() 见 protocol!=chat 即跳过并回落 default——chat 消费者不会空撞该端点。
+  # 启用路径：写 systemone 协议适配层后由适配层直读本段配置。
+  decision:
+    protocol: systemone
+    model: decision-model-preview
+    api_key: ""
+    base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 
 im:                         # QQ 官方机器人 WebSocket/REST（不是 NapCat）
   qq:

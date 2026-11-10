@@ -82,10 +82,15 @@ class LLM:
         self.llm = cfg.get("llm") or {}
 
     def conf(self, fn):
-        """职能 → 生效配置；default 回落。任一必填缺失 → None（fail-closed）"""
-        c = self.llm.get(fn) or self.llm.get("default")
-        if isinstance(c, dict) and c.get("api_key") and c.get("model") and c.get("base_url"):
-            return c
+        """职能 → 生效配置；default 回落。任一必填缺失 → None（fail-closed）。
+        protocol 非 chat 的通道（如阿里 decision-model-preview 的 systemone 协议）
+        对 chat/completions 消费不可达——跳过并回落 default。配置段仍保留在
+        instance.yaml 作为资产，由协议适配层决定是否启用（2026-11-10 运营裁定：
+        配置应该在，用不用按设计决定）。"""
+        for c in (self.llm.get(fn), self.llm.get("default")):
+            if (isinstance(c, dict) and c.get("protocol", "chat") == "chat"
+                    and c.get("api_key") and c.get("model") and c.get("base_url")):
+                return c
         return None
 
     def chat(self, fn, system, user, temperature=None, max_tokens=1024,

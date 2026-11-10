@@ -95,12 +95,12 @@
 ## 独立决策通道（2026-11-04，2026-11-10 已移除）
 
 - ~~新增 `llm.decision`：阿里 Token Plan `decision-model-preview`~~
-- **移除原因（2026-11-10 查实）**：该模型走 systemone 专用协议（`/compatible-mode/v1/systemone`，`state`+`questions` 结构，只输出 choice/noul/score 判定），**不支持 chat/completions**。生产配置按其走 chat/completions 调用，端点自始返回 HTTP 400 "url error"，全月静默失败 4205 次、全部经 `fallback_to_default` 由旧 default 链兜底——无人发现。且 decision 通道的实际消费者（选题评分 7000 字 JSON、标的 why 推理、信息卡入选理由）都是生成式任务，systemone 形态装不下。
-- 端点本身实测可用（systemone 协议，noul/choice 秒回）。若未来要把"值不值得互动/名企门槛"等真·分类判定迁过去，需先写协议适配层，留作可选项。
+- **故障查实（2026-11-10）**：该模型走 systemone 专用协议（`/compatible-mode/v1/systemone`，`state`+`questions` 结构，只输出 choice/noul/score 判定），**不支持 chat/completions**。生产配置按其走 chat/completions 调用，端点自始返回 HTTP 400 "url error"，全月静默失败 4205 次、全部经 `fallback_to_default` 由旧 default 链兜底——无人发现。且 decision 通道的实际消费者（选题评分 7000 字 JSON、标的 why 推理、信息卡入选理由）都是生成式任务，systemone 形态装不下。
+- **处置（运营裁定：配置应该在，用不用按设计决定）**：`decision:` 段保留在 instance.yaml 作 dormant 资产（`protocol: systemone` 标记），`llm.conf()` 见非 chat 协议即跳过并回落 default——chat 消费者不空撞该端点，配置原地待启用。端点实测可用（noul/choice 46ms 正常返回）；分类型判定（值不值得互动/名企门槛）迁过去需先写协议适配层。
 
 ## LLM 换链 GLM 与通道健康告警（2026-11-10 运营拍板）
 
-- **换链**：kimi 老链退役。所有职能（draft/reply/comment/report/analysis/review/decision）统一走 `default` 供应商链：GLM Coding Plan `glm-5.3-flash` 为主，DeepSeek 官方 `deepseek-chat`、火山 `deepseek-v4.1-flash` 按序互备（10 分钟熔断自动跳过，额度恢复回归原顺位）。探针实测三家端点全通；真实 decision 调用实证由 glm-5.3-flash 直服。
+- **换链**：kimi 老链退役。所有 chat 职能（draft/reply/comment/report/analysis/review/decision）统一走 `default` 供应商链：GLM Coding Plan `glm-5.3-flash` 为主，DeepSeek 官方 `deepseek-chat`、火山 `deepseek-v4.1-flash` 按序互备（10 分钟熔断自动跳过，额度恢复回归原顺位）。探针实测三家端点全通；真实 decision 调用实证由 glm-5.3-flash 直服。decision 通道配置保留为 dormant 资产（见上一节）。
 - 附带事故：换链部署时 `chmod 600` 抹掉了配置文件的 ACL 读授权，ubuntu 身份服务起不来——已改 `ubuntu:root 600`（仅 root+属主可读），教训：该文件不要用 chmod 改权限，用 chown。
 - **通道健康三道防线**（回应对 decision 静默失败一整月无人发现的问责）：
   1. `llm.py` 全供应商链失败先落审计 `chainFail` 再抛异常（此前无日志只能靠调用方间接发现）；
