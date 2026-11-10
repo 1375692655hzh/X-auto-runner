@@ -627,6 +627,9 @@ def _try_post(llm, account, st):
         log_event("cognitive", account, action="skip", scene="post-original")
         return False
     from news_auto import _apply_growth_tags
+    from tickers import apply_ticker_line
+    from account_status import post_max_len
+    text, ticker_line = apply_ticker_line(text, llm, selected, max_len=post_max_len())
     text, growth_tagged = _apply_growth_tags(text)
     today = datetime.now().strftime("%Y-%m-%d")
     rationale = (f"资讯源自动发布：{selected.get('form')}·{selected.get('source')}·"
@@ -634,6 +637,7 @@ def _try_post(llm, account, st):
     r2 = xc("POST", "/execute", {
         "kind": "post", "intent_id": f"cog-p-{datetime.now().strftime('%Y%m%d-%H%M')}",
         "text": text, "rationale": rationale, "growth_tags": growth_tagged,
+        "ticker_line": ticker_line or False,
     }, timeout=120)
     if r2.get("status") == "pending_review":
         st["last_post_date"] = today

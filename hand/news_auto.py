@@ -929,6 +929,10 @@ def tick():
                                           if s.get("story_id") == story_id), {}),
                                     recent_history() + drafted)
             text = produced["text"]
+            # 帖尾元数据（2026-11-10 运营拍板）：先标的行（产业链关联判定器），后互关tag
+            from tickers import apply_ticker_line
+            from account_status import post_max_len
+            text, ticker_line = apply_ticker_line(text, llm, full, max_len=post_max_len())
             text, growth_tagged = _apply_growth_tags(text)
         except EditorialSkip as e:
             _audit("editorial_skip", item_id=it.get("id"), story_id=story_id,
@@ -962,9 +966,13 @@ def tick():
                      f"增量：{r['increment'][:70]}")
         if growth_tagged:
             _audit("growth_tag", item_id=it.get("id"), story_id=story_id, ticket=iid)
+        if ticker_line:
+            _audit("ticker_line", item_id=it.get("id"), story_id=story_id,
+                   ticket=iid, note=ticker_line[:80])
         res = xc("POST", "/execute", {"kind": "post", "intent_id": iid,
                                       "text": text.strip(), "rationale": rationale,
                                       "news_detail": news_detail, "growth_tags": growth_tagged,
+                                      "ticker_line": ticker_line or False,
                                       "value_reviews": produced["reviews"],
                                       "mandate": make_mandate(r, story_id)}, timeout=120)
         status = _execute_route(res)
