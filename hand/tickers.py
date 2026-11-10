@@ -246,7 +246,7 @@ def _chain_rows(llm, material, direct_list):
     user = (f"素材：\n{material}\n\n"
             f"直接涉及（不得重复输出）：{' '.join(direct_list) if direct_list else '无'}")
     try:
-        out = llm.chat("tickers", CHAIN_PROMPT, user, max_tokens=800, timeout=40, retries=1)
+        out = llm.chat("tickers", CHAIN_PROMPT, user, max_tokens=2400, timeout=40, retries=1)
     except Exception as e:
         log_event("tickers", "wcixot", action="chainSkip", note=str(e)[:100])
         return "", []
@@ -302,7 +302,7 @@ def _verify_chain(llm, material, ev, rows):
     listing = "\n".join(f"{r['t']} {r['role']}｜{r['why']}" for r in rows)
     user = f"素材：\n{material[:1500]}\n\nevent_type：{ev or '未知'}\n待核候选：\n{listing}"
     try:
-        out = llm.chat("tickers", VERIFY_PROMPT, user, max_tokens=400, timeout=30, retries=0)
+        out = llm.chat("tickers", VERIFY_PROMPT, user, max_tokens=800, timeout=30, retries=0)
     except Exception as e:
         log_event("tickers", "wcixot", action="verifySkip", note=str(e)[:80])
         return rows

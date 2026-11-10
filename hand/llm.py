@@ -129,14 +129,20 @@ class LLM:
                 errs.append(f"{tag}: 熔断中（{_PROVIDER_HEALTH[tag].get('reason', '')}）")
                 continue
             downstream = pi < len(providers) - 1
-            pchain = [{"model": prov["model"], "effort": prov.get("reasoning_effort")}] + [
-                {"model": fb.get("model"), "effort": fb.get("reasoning_effort")}
+            pchain = [{"model": prov["model"], "effort": prov.get("reasoning_effort"),
+                       "extra": prov.get("extra_body")}] + [
+                {"model": fb.get("model"), "effort": fb.get("reasoning_effort"),
+                 "extra": fb.get("extra_body")}
                 for fb in (prov.get("fallback_models") or []) if fb.get("model")]
             prov_errs, all_429, dead = [], bool(pchain), False
             for mc in pchain:
                 body = {**base, "model": mc["model"]}
                 if mc.get("effort"):
                     body["reasoning_effort"] = str(mc["effort"])
+                if isinstance(mc.get("extra"), dict):
+                    # 厂商特有参数透传（如 DeepSeek thinking、开关类字段）——
+                    # 主代码保持供应商无关，参数只进配置（2026-11-10 思考吃预算事故）
+                    body.update(mc["extra"])
                 try:
                     out = self._post(fn, prov, body, timeout, eff_retries)
                     _breaker_ok(tag)

@@ -73,7 +73,9 @@ def _author_draft(llm, item, history, operator_instruction="", review_feedback="
 def _review(llm, item, text, history):
     hist = "\n".join(f"· {x[:160]}" for x in (history or [])[-8:]) or "（无）"
     user = f"【完整素材】\n{item.get('text')}\n\n【拟发布正文】\n{text}\n\n【近期正文】\n{hist}"
-    out = llm.chat("review", REVIEW_PROMPT, user, max_tokens=1400, timeout=100, retries=2)
+    # max_tokens 3600：思考型模型（deepseek v4-pro 兜底）推理与输出共享预算，
+    # 1400 会被思考吃光 → content 空（2026-11-10 chainFail 事故实测）
+    out = llm.chat("review", REVIEW_PROMPT, user, max_tokens=3600, timeout=100, retries=2)
     d = _json_from(out)
     decision = str(d.get("decision") or "").lower()
     issues = d.get("issues")
