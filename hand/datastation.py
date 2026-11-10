@@ -79,10 +79,19 @@ def fetch_material(forms=("精品文章", "周期报告"), limit=8, hours=6,
     return _normalize_items(items, text_limit)
 
 
+class IncrementalTruncated(RuntimeError):
+    """增量翻页达上限。rows = 已读到的最新段（新→旧），更旧的段落未读。
+    调用方可截断推进（丢弃旧段、记审计），避免生产线被积压永久锁死。"""
+
+    def __init__(self, form, max_pages, rows):
+        super().__init__(f"{form} 增量翻页超过 {max_pages} 页，未完整读取")
+        self.rows = rows
+
+
 def fetch_incremental(form, since="", limit=50, text_limit=1400, max_pages=8):
     """Source 增量读取：since=上次最大素材时间；next_cursor 用于向旧页完整翻页。
     持续运行不能保存 next_cursor 当未来游标——它只表示本批的旧页位置。
-    任何一页失败或翻页不完整都抛错，调用方不得推进读取位置。"""
+    任何一页失败抛错；翻页不完整抛 IncrementalTruncated（携带已读段）。"""
     params = {"forms": form, "limit": limit}
     if since:
         params["since"] = since
@@ -102,7 +111,9 @@ def fetch_incremental(form, since="", limit=50, text_limit=1400, max_pages=8):
             break
         cursor = nxt
     else:
-        raise RuntimeError(f"{form} 增量翻页超过 {max_pages} 页，未完整读取")
+        # 截断：返回已读的最新段；旧段未读，由调用方决定截断推进或拒绝
+        dedup_partial = {str(it["id"]): it for it in out}
+        raise IncrementalTruncated(form, max_pages, list(dedup_partial.values()))
     # 跨页/同批幂等去重
     dedup = {str(it["id"]): it for it in out}
     rows = list(dedup.values())

@@ -268,7 +268,25 @@ class Gateway:
             if kind == "post":
                 from news_auto import auto_authorized
                 auto = auto_authorized(intent)
-            if self.approval.get(kind, self.approval.get("default", "required")) == "required" or auto:
+            mode = self.approval.get(kind, self.approval.get("default", "required"))
+            if mode == "none":
+                # 免审≠绕过票据：建票即自动批准，与 auto 同一条执行链落账。
+                # 2026-11-10 修复：此前 none 跳过建票，_perform 拿不到票一律
+                # 「票据不可执行」——开跑当晚 8 个自动回关全部 4ms 失败即此因。
+                t = self.tickets.get(iid)
+                if t is None:
+                    self.tickets.sweep_expired()
+                    self.tickets.create(kind, intent, intent.get("rationale", ""))
+                    log_event("server", self.ledger.account, action="ticketCreate",
+                              kind=kind, ticket=iid)
+                    self.tickets.decide(iid, True, by="policy:approval-none")
+                    t = self.tickets.get(iid)
+                    log_event("server", self.ledger.account, action="autoApprove",
+                              kind=kind, ticket=iid, policy="approval-none")
+                if t["status"] in ("rejected", "expired", "cancelled"):
+                    raise Deny(f"TICKET_{t['status'].upper()}",
+                               "旧票终态不可复活；新提案请换 intent_id")
+            elif mode == "required" or auto:
                 self.tickets.sweep_expired()
                 t = self.tickets.get(iid)
                 if t is None:

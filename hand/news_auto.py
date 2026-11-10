@@ -772,8 +772,11 @@ def replay(hours=24, resume=False):
 
 def _fetch_new(st):
     """两类 Source 各自保存 last_time；当批用 next_cursor 完整翻页。
-    返回（未评条目, 本次观察到的各源最大时间）；只有评分成功后才推进位置。"""
-    from datastation import fetch_incremental
+    返回（未评条目, 本次观察到的各源最大时间）；评分成功后才推进位置。
+    2026-11-10 修复：①单源失败/翻页超限不拖垮另一源（文章源超页曾把资讯
+    源拖停 46h）；②翻页超限截断读取最新段并推进位置——旧段记审计后跳过，
+    生产线不再被积压永久锁死（11-06~11-10 停摆 4 天实证）。"""
+    from datastation import fetch_incremental, IncrementalTruncated
     sources = st.setdefault("sources", {})
     positions = {}
     raw = []
@@ -783,7 +786,16 @@ def _fetch_new(st):
         last_time = (sources.get(key) or {}).get("last_time") or ""
         if not last_time:
             last_time = (datetime.now() - timedelta(hours=default_hours)).strftime("%Y-%m-%d %H:%M")
-        rows = fetch_incremental(form, since=last_time, limit=limit, text_limit=text_limit)
+        try:
+            rows = fetch_incremental(form, since=last_time, limit=limit, text_limit=text_limit)
+        except IncrementalTruncated as e:
+            rows = e.rows
+            _audit("source_truncated", form=form, since=last_time, fetched=len(rows))
+            log_event("news_auto", "wcixot", action="sourceTruncated",
+                      note=f"{form} 翻页超限：截断取新 {len(rows)} 条，旧段跳过并推进位置")
+        except Exception as e:
+            log_event("news_auto", "wcixot", action="sourceFail", note=str(e)[:120])
+            continue  # 单源失败只跳过该源，另一源照常
         raw.extend(rows)
         times = [str(it.get("time") or "") for it in rows if it.get("time")]
         if times:

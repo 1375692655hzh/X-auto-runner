@@ -198,6 +198,42 @@ class Bot:
                 if self.reply(oid, f"⚠️ 今日 LLM token 已达 {total:,}（告警线 {limit:,}），请检查任务量与供应商。", None):
                     notified[key] = "sent"
                     changed = True
+        # 生产线沉默告警：活跃窗内超 6h 无成功节拍且过开局宽限 → 按日去重。
+        # 背景：2026-11-06~11-10 上游停摆 4 天无人发现，直到运营者追问产量。
+        try:
+            from pathlib import Path
+            cfg = __import__("yaml").safe_load(
+                Path("/etc/xar/instance.yaml").read_text(encoding="utf-8"))
+            win = ((cfg.get("runtime") or {}).get("active_window") or ["06:30", "24:00"])
+        except Exception:
+            win = ["06:30", "24:00"]
+
+        def _to_min(hhmm):
+            h, m = str(hhmm).split(":")[:2]
+            return int(h) * 60 + int(m)
+
+        now_min = datetime.now().hour * 60 + datetime.now().minute
+        if _to_min(win[0]) <= now_min < _to_min(win[1]):
+            stale_h = None
+            last = ""
+            try:
+                st = json.loads((STATE_DIR / "news-auto.json").read_text(encoding="utf-8"))
+                last = str(st.get("last_run_at") or "")
+                if last:
+                    lt = datetime.fromisoformat(last[:19])
+                    stale_h = (datetime.now() - lt).total_seconds() / 3600
+                else:
+                    stale_h = 99.0
+            except Exception:
+                stale_h = None
+            if stale_h is not None and stale_h > 6 and now_min >= _to_min(win[0]) + 360:
+                key = "alert:silence:" + datetime.now().strftime("%Y-%m-%d")
+                if not notified.get(key):
+                    msg = (f"⚠️ 资讯生产线已沉默 {stale_h:.0f} 小时"
+                           f"（最后成功节拍 {last[:16] or '无记录'}），请检查 datastation 与评分链。")
+                    if self.reply(oid, msg, None):
+                        notified[key] = "sent"
+                        changed = True
         return changed
 
     # ── 指挥官白名单 ──

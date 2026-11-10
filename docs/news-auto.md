@@ -148,3 +148,15 @@ python /opt/xar/hand/news_auto.py
 - approval 按 kind 配置：reply/comment/follow=none（互动全自动，质量门与预算帽仍拦截）；post 的 auto 仅由 news_auto 授权路径批准，旧 review 票不追溯放行。
 - budget_24h 对齐 x-auto-tool 任务量：post 10 / reply 20 / comment 60 / like 30 / follow 180 / unfollow 0（24h 滚动帽）。
 - 回关统一按 x-auto-tool：事件驱动自动回关。注意 x-auto-tool 的 80 评论/180 关注量由其 #互关 关键词搜索引擎供给，本架构互动为通知/关系驱动，实际日量受事件数与种子池约束。
+
+## 停摆事故与修复（2026-11-10）
+
+**事故**：11-06 10:39 起生产线停摆 4 天（11-06~11-09 零产出，运营者追问发现）。链条：11-06 评分失败（LLM 串稿/JSON 解析）→ 按 fail-closed 设计不推进读取位置 → 积压逐日增大 → 11-08 精品文章增量超 8 页上限 → 每拍整拍 sourceFail，资讯源被文章源拖停。
+
+**修复**（均已上线+回归测试）：
+- `_fetch_new` 单源隔离：一个源失败只跳过该源，另一源照常评分。
+- 翻页超限截断推进：`IncrementalTruncated` 携带已读最新段，截断取新、推进位置、旧段记审计（`source_truncated`）——生产线不再被积压永久锁死。
+- `approval: none` 路由修复：免审动作此前不建票，执行段拿不到票 4ms 拒发（开跑当晚 8 个自动回关全败即此因）；现建票+自动批准（`policy:approval-none`），与 auto 同链落账。
+- 沉默告警：活跃窗内 6h 无成功节拍且过开局宽限 → QQ 按日告警（`_ops_alerts`）。
+
+**恢复实证**：pos 手动推进清 4 天积压后，11-10 11 点桶 43 候选→入选 5→5 张票全部 `done·新发`（`policy:news-auto` 批准），FxTwitter 核到 5 条真实上线（11:18–11:21）。auto 链路首次完整实证。
