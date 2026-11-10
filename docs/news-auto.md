@@ -1,4 +1,12 @@
-# 资讯源自动发布 v1（2026-11-02）
+# 资讯源自动发布 v1（2026-11-02；2026-11-10 起为多链框架中的「深度文」链引擎）
+
+## 多链内容生产框架（2026-11-10 运营立项，骨架先行）
+
+- **定位**：auto 发帖从单一生产线升级为多链体系；每条链=一个内容类目，约束**按链隔离，不互相传染**（2026-11-10 链级长度裁决的框架化）。运营将逐条推进新类目，本框架只做骨架。
+- **首条链**：`deep/深度文`——原资讯原创生产线整体降格为链（引擎仍为 news_auto.py），QQ 待审推送/票面带【深度文】前缀。
+- **链注册表** `hand/chains.py` + instance.yaml `chains:` 段：`display`（展示名）/`engine`（生产引擎，_ENGINES 白名单注册）/`budget_24h`（链内日上限，引擎开票前自查，审计 `chainBudgetHold`；全局 kind 帽仍在 Gateway 兜底）/`length`（none 或 max+max_len，链级长度策略）/`ticker_line`（标的行开关）/`growth_tags`（互关tag开关+概率）。非法配置 fail-closed 拒启。
+- **origin 三态约定**（与额度/排队联动）：`manual`=运营者增量任务（豁免额度+排队-1级）；`chain:<id>`=该链 auto 产出（正常计额度、按 kind 四级排队）；缺省=主脑散帖/其他。深度文链的票 origin=`chain:deep`。
+- **新增链 runbook**：①chains.py `_ENGINES` 注册引擎（或复用 news_auto）→ ②instance.yaml `chains:` 加段（display/budget/length/贴标开关）→ ③引擎内 `chains.get(<id>)` 读配置驱动产线 → ④测试（chains_test 扩展）→ ⑤金标/回归过门再启用。
 
 ## 任务边界
 

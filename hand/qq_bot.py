@@ -145,7 +145,13 @@ class Bot:
                         continue
                     p = d.get("payload") or {}
                     body = p.get("text") or ""
-                    text = (f"我想发 {tid}\n\n正文：\n{body}\n\n"
+                    try:
+                        from chains import display as chain_display
+                        cname = chain_display(p.get("chain"))
+                    except Exception:
+                        cname = ""
+                    prefix = f"【{cname}】" if cname else ""
+                    text = (f"{prefix}我想发 {tid}\n\n正文：\n{body}\n\n"
                             f"回复「发{tid}」发布；「驳{tid} 标签 备注」放弃。\n"
                             f"也可以直接说：把{tid}改得更自然/删掉某段/换个角度。\n"
                             f"回复「票 {tid}」看原始素材与审核。")

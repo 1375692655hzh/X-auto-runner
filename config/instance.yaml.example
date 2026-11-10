@@ -60,6 +60,27 @@ im:                         # QQ 官方机器人 WebSocket/REST（不是 NapCat�
     commander_whitelist: [] # 允许下指令的 QQ openid（安全关键）
     commander_claim: false  # 白名单为空时是否允许首个发信人认领；生产建议 false
 
+chains:                      # 多链内容生产框架（2026-11-10 运营立项；骨架先行，类目逐条推进）
+  deep:                     # 首条链：深度文（原资讯原创生产线整体降格为链）
+    display: "深度文"
+    engine: news_auto       # 生产引擎模块（新链接入时在 chains.py._ENGINES 注册）
+    enabled: true
+    budget_24h: 10          # 链内日上限（引擎开票前自查；全局 kind 帽仍在 Gateway 兜底）
+    length: {mode: none}    # 链级长度策略：深度文不设（2026-11-10 裁决）；新链可 {mode: max, max_len: N}
+    ticker_line: true       # 帖尾标的行（tickers.py 判定器）开关
+    growth_tags:            # 互关tag开关与概率
+      enabled: true
+      prob: 0.3333
+  # 新增链示例（推进时解开并定制；约束按链隔离，不互相传染）：
+  # short:
+  #   display: "短评"
+  #   engine: news_auto     # 或新引擎
+  #   enabled: false
+  #   budget_24h: 5
+  #   length: {mode: max, max_len: 280}
+  #   ticker_line: false
+  #   growth_tags: {enabled: true, prob: 0.5}
+
 news_auto:
   mode: review              # review|auto；auto 仅资讯原创，其他动作不受影响
   structured_gate: shadow   # shadow|enforce；先用真实采纳数据对账再转正

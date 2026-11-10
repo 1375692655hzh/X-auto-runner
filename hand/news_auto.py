@@ -775,8 +775,12 @@ GROWTH_TAG_PROB = 1 / 3  # 运营拍板 2026-11-10：主脑产出帖 1/3 带互�
 
 
 def _growth_tags():
+    """互关tag按链配置（chains.py：enabled/prob 按链隔离）。"""
     import random
-    return GROWTH_TAGS if random.SystemRandom().random() < GROWTH_TAG_PROB else ""
+    gt = _chain_cfg().get("growth_tags") or {}
+    if not gt.get("enabled"):
+        return ""
+    return GROWTH_TAGS if random.SystemRandom().random() < float(gt.get("prob") or GROWTH_TAG_PROB) else ""
 
 
 def _apply_growth_tags(text):
@@ -830,6 +834,31 @@ def _fetch_new(st):
     return _dedup_items([it for it in raw if not seen.get(str(it.get("id")))]), positions
 
 
+def _chain_cfg():
+    """本引擎所属链（deep/深度文）配置——多链框架（chains.py），约束按链隔离。"""
+    import chains as _chains
+    return _chains.get("deep")
+
+
+def _chain_issued_today():
+    """链内今日已开票数（审计流 ticketed 计数）——链级 budget_24h 自查口径。
+    计'开票意图'而非'成功'：与全局帽的'尝试即计'语义一致，防失败重试绕过链帽。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    n = 0
+    try:
+        with open(AUDIT_FILE, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get("action") == "ticketed" and str(row.get("at", "")).startswith(today):
+                    n += 1
+    except FileNotFoundError:
+        pass
+    return n
+
+
 def tick():
     """正常调度入口（systemd 每 5min）。选中结果先落盘，再逐张成稿/开票；
     未完成小时优先恢复，票据 ID 按小时+序号固定，重启不重复评估/开票。"""
@@ -849,6 +878,16 @@ def tick():
     now_iso = now.isoformat()[:19]
     hours = st.setdefault("hours", {})
     llm = LLM()
+
+    # 链级预算自查（多链框架）：deep 链今日开票数已达链帽 → 本拍不再开新小时产稿；
+    # 恢复未完成小时不受限（已选稿的收尾不算新增）。
+    chain = _chain_cfg()
+    has_pending_hour = any(not v.get("done") and v.get("pending_selection") is not None
+                           for v in hours.values())
+    if not has_pending_hour and _chain_issued_today() >= chain["budget_24h"]:
+        _audit("chainBudgetHold", note=f"deep 链今日已开票 {chain['budget_24h']}，本拍停发")
+        _save_state(st)
+        return
 
     # 恢复优先：任何已选但未完成的小时先于新小时执行
     pending = sorted((k, v) for k, v in hours.items()
@@ -930,9 +969,12 @@ def tick():
                                     recent_history() + drafted)
             text = produced["text"]
             # 帖尾元数据（2026-11-10 运营拍板）：先标的行（产业链关联判定器），后互关tag
-            from tickers import apply_ticker_line
-            from account_status import post_max_len
-            text, ticker_line = apply_ticker_line(text, llm, full, max_len=post_max_len())
+            # 两者均按链配置开关（chains.py：deep/深度文默认开）
+            ticker_line = ""
+            if chain.get("ticker_line"):
+                from tickers import apply_ticker_line
+                from account_status import post_max_len
+                text, ticker_line = apply_ticker_line(text, llm, full, max_len=post_max_len())
             text, growth_tagged = _apply_growth_tags(text)
         except EditorialSkip as e:
             _audit("editorial_skip", item_id=it.get("id"), story_id=story_id,
@@ -971,6 +1013,8 @@ def tick():
                    ticket=iid, note=ticker_line[:80])
         res = xc("POST", "/execute", {"kind": "post", "intent_id": iid,
                                       "text": text.strip(), "rationale": rationale,
+                                      "origin": f"chain:{chain.get('id', 'deep')}",
+                                      "chain": chain.get("id", "deep"),
                                       "news_detail": news_detail, "growth_tags": growth_tagged,
                                       "ticker_line": ticker_line or False,
                                       "value_reviews": produced["reviews"],
