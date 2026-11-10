@@ -123,19 +123,30 @@ def resolve(name_or_ticker: str) -> str | None:
 
 _REL = {"high": 0, "med": 1, "medium": 1, "low": 2}
 
-PROMPT = """你是美股产业关联判定器。输入一篇财经素材，输出涉及的知名美股上市公司。规则：
-1. direct=素材明确点名、且事件直接作用于该公司的主体；chain=素材未点名但产业链明确关联的知名公司（上游供应商/下游客户/竞争对手/替代者/同赛道受益或承压方）。chain 必须在该事件的真实传导路径上，不为凑数添加弱关联公司；没有就留空数组。
-2. 只输出在 NYSE 或 NASDAQ 主板上市的公司；中国大陆/香港公司仅当存在美股主上市 ADR（如阿里巴巴=BABA）才可输出；ETF、OTC、未上市公司（字节/OpenAI/DeepSeek/智谱/xAI）一律不输出。
-3. 每家给 relevance：high=事件核心主体/直接传导，med=明确环节，low=边缘关联。
-4. company 用常用中文名或英文名；ticker 尽量给但不确定就留空。
-只输出 JSON，不要解释：{"direct":[{"company":"","ticker":"","relevance":"high|med|low"}],"chain":[{"company":"","ticker":"","relevance":"high|med|low"}]}"""
+PROMPT = """你是美股产业关联判定器。输入一篇财经素材，判断事件沿产业链真实传导到哪些知名美股上市公司。目标：每帖给出 3-8 个真实关联（direct+chain 合计）；只有素材与任何美股上市公司都无真实关联时才允许清单为空——不要因为谨慎而交白卷。
+
+一、先给事件定性：结果性事件（营收/财报/出货数据=既有需求的确认）还是变动性事件（涨价/断供/新技术/新协议/政策=改变某方的成本、供给或竞争格局）。
+
+二、素材明示的行业统称必须映射为具体公司并归入 direct：超大云厂商→AMZN/MSFT/GOOGL/META；半导体设备商→ASML/AMAT/LRCX/KLAC；存储厂商→MU/WDC/STX；AI芯片商→NVDA/AMD/AVGO/MRVL；消费电子巨头→AAPL；电动车→TSLA；中国互联网→BABA/PDD/JD；矿机/加密→COIN/MSTR/MARA。素材点名对照方/被比较方（如"芯片商CDS vs 云厂商"）时，对照双方都是 direct。
+
+三、结果性事件的 chain 传导方向（因果不倒置）：
+- supplier 上游供应商：主体扩产/需求上行→设备与材料商接单受益（营收飙→ASML/AMAT/LRCX/KLAC）。
+- peer 同行/竞争对手：景气度互证，一家的数据验证全行业周期。
+- cycle 景气同向环节：事件确认某条周期时，同周期其他环节（AI资本开支→电力VRT/VST/CEG、散热、存储）。
+- customer 下游客户：默认不推——客户需求是结果性事件的原因不是被改变方；仅当事件改变客户成本/供给/议价（涨价/断供/独家绑定）时推，why 必须写明。
+- substitute 替代者：事件削弱某技术路线时的输家或新路线赢家。
+每个环节取 1-2 家最强代表，环节多样性优先于数量；全部环节都无真实关联才留空。
+
+四、只输出在 NYSE 或 NASDAQ 主板上市的公司；中国大陆/香港公司仅当存在美股主上市 ADR（如阿里巴巴=BABA）；ETF、OTC、未上市公司（字节/OpenAI/DeepSeek/智谱/xAI）一律不输出。
+五、每个关联必须给 role 和 why（≤20字传导机制），给不出 why 就不列。relevance：high=核心主体或直接传导，med=明确环节（low 不输出）。
+只输出 JSON：{"event_type":"结果性|变动性","direct":[{"company":"","ticker":"","relevance":"high|med"}],"chain":[{"company":"","ticker":"","role":"supplier|peer|cycle|customer|substitute","why":"","relevance":"high|med"}]}"""
 
 
 def related_tickers(llm, item, cap=10):
     """LLM 判定 + 白名单校验。返回 [(ticker, kind)]，kind ∈ direct|chain；
-    按直接涉及→关联度→知名度排序，截断 cap。未知公司丢弃并记日志。"""
+    按直接涉及→关联度→知名度排序，截断 cap。未知公司丢弃并记日志（含 why 便于审计）。"""
     material = f"{item.get('title') or ''}\n{(item.get('text') or '')[:4000]}"
-    out = llm.chat("decision", PROMPT, material, max_tokens=900, timeout=45, retries=1)
+    out = llm.chat("decision", PROMPT, material, max_tokens=1200, timeout=45, retries=1)
     s = (out or "").strip()
     s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s)
     try:
@@ -150,7 +161,7 @@ def related_tickers(llm, item, cap=10):
         except json.JSONDecodeError:
             log_event("tickers", "wcixot", action="parseFail", note=str(out)[:80])
             return []
-    entries, dropped = [], []
+    entries, dropped, whys = [], [], []
     for kind in ("direct", "chain"):
         for row in (d.get(kind) or []):
             if not isinstance(row, dict):
@@ -162,6 +173,8 @@ def related_tickers(llm, item, cap=10):
             rel = _REL.get(str(row.get("relevance") or "med").lower(), 1)
             fame = WHITELIST[t][1]
             entries.append({"t": t, "kind": kind, "key": (0 if kind == "direct" else 1, rel, fame, t)})
+            if kind == "chain" and row.get("why"):
+                whys.append(f"{t}:{str(row.get('role') or '?')}/{str(row['why'])[:18]}")
     # 同 ticker 去重：direct 优先保留
     seen = {}
     for e in entries:
@@ -170,6 +183,8 @@ def related_tickers(llm, item, cap=10):
     ranked = sorted(seen.values(), key=lambda e: e["key"])[:cap]
     if dropped:
         log_event("tickers", "wcixot", action="droppedNonWhitelist", note=";".join(dropped)[:120])
+    if whys:
+        log_event("tickers", "wcixot", action="chainWhy", note=";".join(whys)[:200])
     return [(e["t"], e["kind"]) for e in ranked]
 
 
