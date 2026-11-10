@@ -101,6 +101,8 @@ def filter_candidates(posts, pool, st, self_handle, cooldown_days):
                 pass
         if not text:
             continue
+        if p.get("has_media") or p.get("locked"):
+            continue   # 媒体帖评论必被媒体闸拦（首拍实测3条），锁定帖不可回——前置过滤不浪费关注对
         out.append({"author": author, "sid": sid, "text": text[:200]})
     return out
 
@@ -237,6 +239,7 @@ def _engage_one(xc, llm, draft_scene, account, pool, cand, route, cfg):
     r2 = xc("POST", "/execute", {
         "kind": "comment", "intent_id": f"patrol-c-{sid[-12:]}",
         "text": text, "status_id": sid, "target_handle": author,
+        "post_url": f"https://x.com/i/web/status/{sid}",   # reply_pipeline 导航必需
         "target_len": len(cand["text"]), "casual": True, "engage": route,
         "origin": "chain:patrol",
         "rationale": f"互关巡逻浇灌（{route}）@{author}"}, timeout=120)
