@@ -700,6 +700,14 @@ def _draft_report(llm, account, led):
             text += "\n\n【近7天发布效果（只读采样）】\n" + json.dumps(effect, ensure_ascii=False)[:700]
     except Exception:
         pass
+    try:
+        # 审计日聚合（阶段二运营研究环）：今日产出按来源/链分组 + 标的判定器审计块
+        from audit_digest import text_block as _audit_block
+        block = _audit_block()
+        if block:
+            text += "\n\n" + block
+    except Exception:
+        pass
     day = datetime.now().strftime("%Y-%m-%d")
     (STATE_DIR / f"daily-report-{day}.md").write_text(text, encoding="utf-8")
     log_event("cognitive", account, action="reportDrafted", file=f"daily-report-{day}.md")
