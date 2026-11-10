@@ -188,7 +188,7 @@ class LLM:
         raise RuntimeError(f"llm.{fn} 全供应商链失败（{len(providers)}家）: "
                            + " ‖ ".join(errs))
 
-    def probe_heads(self, fns=("default", "decision", "review")):
+    def probe_heads(self, fns=("default", "decision", "review", "tickers")):
         """主动健康探针：逐一 ping 各通道链上每家供应商（只测连通+额度，
         不碰熔断器、不触发回退、不写 token 审计）。返回 [(fn, ok, detail)]。
         2026-11-10 新增：qq_bot 每 30 分钟调用一次，供应商故障/额度耗尽

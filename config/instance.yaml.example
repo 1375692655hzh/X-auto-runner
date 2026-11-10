@@ -23,10 +23,10 @@ llm:                        # 2026-11-10 换链后结构：所有职能统一走
     base_url: ""
     temperature: 1
     # 跨供应商按序互备（2026-11-05 机制）：主key耗尽/失效时落到下家，10分钟熔断自动跳过。
-    # 生产当前：GLM → DeepSeek 官方(deepseek-chat)。
-    # 运营授权边界（2026-11-10）：仅四家 API——GLM 自动化 / DeepSeek（搜索key兼文本兜底）/
-    # 阿里图像 qwen-image-3.0-pro / 阿里决策 decision-model-preview(systemone)。
-    # 不得新增供应商（含历史遗留的火山）除非运营明确授权。
+    # 生产当前：GLM → DeepSeek 官方(deepseek-chat，专用文本key)。
+    # 运营授权边界（2026-11-10）：GLM 自动化 / DeepSeek 文本key / DeepSeek 检索key（仅限
+    # 未来搜索功能，禁入任何文本链）/ 阿里图像 / 阿里决策(systemone) / ARK deepseek-v4.1-flash
+    # （仅判定器通道）。不得新增供应商或扩用途除非运营明确授权。
     fallback_providers:
     - {model: "", api_key: "", base_url: ""}
   # 判定器专用通道（2026-11-10 晚运营拍板）：ARK deepseek-v4.1-flash 头 + DeepSeek 官方兜底。
