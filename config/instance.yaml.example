@@ -16,19 +16,21 @@ account:                    # 必填
 persona:                    # P4 起必填
   card: "/etc/xar/persona-card.md"
 
-llm:                        # 2026-11-10 换链后结构：所有职能统一走 default 供应商链，
-  default:                  # 不再分 draft/reply/comment/report/analysis/review/decision 通道
-    model: ""              # GLM Coding Plan：glm-5.3-flash @ open.bigmodel.cn/api/coding/paas/v4
+llm:                        # 2026-11-10 晚结构：全项目 default 链 = DeepSeek 文本key 头，
+  default:                  # 判定器另有专用通道 tickers；decision 为 dormant 资产
+    model: ""              # DeepSeek 官方：deepseek-flash @ api.deepseek.com（同key可互备 deepseek-v4-pro）
     api_key: ""
     base_url: ""
-    temperature: 1
     # 跨供应商按序互备（2026-11-05 机制）：主key耗尽/失效时落到下家，10分钟熔断自动跳过。
-    # 生产当前：GLM → DeepSeek 官方(deepseek-chat，专用文本key)。
-    # 运营授权边界（2026-11-10）：GLM 自动化 / DeepSeek 文本key / DeepSeek 检索key（仅限
-    # 未来搜索功能，禁入任何文本链）/ 阿里图像 / 阿里决策(systemone) / ARK deepseek-v4.1-flash
-    # （仅判定器通道）。不得新增供应商或扩用途除非运营明确授权。
+    # 生产当前：deepseek-flash（+deepseek-v4-pro 同key）→ GLM 末位兜底。
+    # 运营授权边界（2026-11-10）：DeepSeek 文本key（文本链专用）/ DeepSeek 检索key（仅限
+    # 未来搜索功能，禁入任何文本链）/ GLM 自动化（现为末位兜底）/ 阿里图像 /
+    # 阿里决策(systemone) / ARK deepseek-v4.1-flash（仅判定器通道）。
+    # 不得新增供应商或扩用途除非运营明确授权；key 技术上可用 ≠ 授权使用。
+    fallback_models:
+    - {model: ""}          # deepseek-v4-pro
     fallback_providers:
-    - {model: "", api_key: "", base_url: ""}
+    - {model: "", api_key: "", base_url: ""}   # GLM glm-5.3-flash 末位兜底
   # 判定器专用通道（2026-11-10 晚运营拍板）：ARK deepseek-v4.1-flash 头 + DeepSeek 官方兜底。
   # 背景：glm-5.3-flash 思考模式 ~7tok/s 拖垮判定热路径；范围仅判定器（tickers.py），
   # 其余职能仍走 default 链。缺省本段时 conf 自动回落 default。
