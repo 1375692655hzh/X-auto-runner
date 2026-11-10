@@ -29,6 +29,16 @@ llm:                        # 2026-11-10 换链后结构：所有职能统一走
     # 不得新增供应商（含历史遗留的火山）除非运营明确授权。
     fallback_providers:
     - {model: "", api_key: "", base_url: ""}
+  # 判定器专用通道（2026-11-10 晚运营拍板）：ARK deepseek-v4.1-flash 头 + DeepSeek 官方兜底。
+  # 背景：glm-5.3-flash 思考模式 ~7tok/s 拖垮判定热路径；范围仅判定器（tickers.py），
+  # 其余职能仍走 default 链。缺省本段时 conf 自动回落 default。
+  tickers:
+    model: ""                # ARK: deepseek-v4.1-flash @ ark.cn-beijing.volces.com/api/plan/v3
+    api_key: ""
+    base_url: ""
+    fallback_providers:
+    - {model: "", api_key: "", base_url: ""}   # DeepSeek 官方 deepseek-chat
+    fallback_to_default: true  # 双兜底全挂时最后回落 default 链（罕见）
   # decision 通道：dormant 资产保留（2026-11-10 运营裁定：配置应该在，用不用按设计决定）。
   # 阿里 decision-model-preview 走 systemone 专用协议（POST {base_url}/systemone，
   # body 为 state+questions，输出 choice/noul/score 结构化判定），不支持 chat/completions。

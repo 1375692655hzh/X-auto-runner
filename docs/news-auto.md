@@ -172,6 +172,7 @@ python /opt/xar/hand/news_auto.py
 ## 产业链关联标的判定器（2026-11-10 运营拍板；v4 五段管线当日上线）
 
 - **运营要求**：帖尾覆盖"消息原文直接挂钩标的 + 消息影响/影射标的"，按关联度、知名度排序，上限 10 只。经两轮 MoA（K3+grok+codex；grok+astra+cursor/kimi-for-coding+k3）定框架后实施。
+- **判定器专用通道 `llm.tickers`（2026-11-10 晚运营拍板）**：ARK `deepseek-v4.1-flash` 头 + DeepSeek 官方兜底 + default 链极端兜底。背景：glm-5.3-flash 思考模式实测 ~7tok/s，判定单调用 118-152s 拖垮发布热路径，判定器暂停用 GLM（仅此工具；其余职能仍走 default 链 GLM 头）。换通道当日按制度跑金标 4/4 过。
 - **v4 五段管线**（v3 单次 LLM 全责结构的重构，根因：检索活交给生成模型——kimi→GLM 换链后 3 案例漏 2 个素材主体 $TSM/$MU）：
   1. **代码 direct 扫描器**（确定性，永不失败）：素材(title+text)∪成稿正文白名单别名匹配（拉丁 ASCII 边界/CJK 子串/≤2 字符 ticker 只认 $ 前缀）+ 行业统称映射表 INDUSTRY_MAP（"超大云厂商"→AMZN/MSFT/GOOGL/META 等，从 prompt 搬进代码）。漏 $TSM/$MU 在结构上不可能再发生。
   2. **LLM 搜集**（chain 专用 prompt）：白名单 150 家内嵌 prompt（模型从菜单点选），只产 event_type + chain（supplier/peer/cycle/customer/substitute + ≤20字 why）；素材无具体业务落点（泛政策/泛趋势）时 chain 必须为空，宁缺毋滥。

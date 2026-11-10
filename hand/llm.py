@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from ledger import log_event  # noqa: E402
 
-FUNCTIONS = ("draft", "reply", "comment", "report", "vision", "analysis", "review", "decision")
+FUNCTIONS = ("draft", "reply", "comment", "report", "vision", "analysis", "review", "decision",
+             "tickers")
 
 
 class LLMNotConfigured(RuntimeError):

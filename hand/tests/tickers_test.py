@@ -43,7 +43,7 @@ class MockLLM:
         self.calls = []
 
     def chat(self, fn, system, user, **kw):
-        assert fn == "decision"
+        assert fn == "tickers"
         self.calls.append((system, user))
         return self.verify if "质检" in system else self.chain
 
