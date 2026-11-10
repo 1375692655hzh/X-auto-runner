@@ -100,7 +100,7 @@
 
 ## LLM 换链 GLM 与通道健康告警（2026-11-10 运营拍板）
 
-- **换链**：kimi 老链退役。所有 chat 职能（draft/reply/comment/report/analysis/review/decision）统一走 `default` 供应商链：GLM Coding Plan `glm-5.3-flash` 为主，DeepSeek 官方 `deepseek-chat`、火山 `deepseek-v4.1-flash` 按序互备（10 分钟熔断自动跳过，额度恢复回归原顺位）。探针实测三家端点全通；真实 decision 调用实证由 glm-5.3-flash 直服。decision 通道配置保留为 dormant 资产（见上一节）。
+- **换链**：kimi 老链退役。所有 chat 职能（draft/reply/comment/report/analysis/review/decision）统一走 `default` 供应商链：GLM Coding Plan `glm-5.3-flash` 为主，DeepSeek 官方 `deepseek-chat` 兜底（10 分钟熔断自动跳过，额度恢复回归原顺位）。探针实测端点全通；真实 decision 调用实证由 glm-5.3-flash 直服。decision 通道配置保留为 dormant 资产（见上一节）。**授权边界（运营拍板）**：全线仅限四家 API（GLM 自动化 / DeepSeek / 阿里图像 / 阿里决策）；换链时曾沿用 kimi 时代遗留的火山 key 当第三兜底，运营指出后已移除——供应商增减必须运营明确授权，历史遗留资产不算授权。
 - 附带事故：换链部署时 `chmod 600` 抹掉了配置文件的 ACL 读授权，ubuntu 身份服务起不来——已改 `ubuntu:root 600`（仅 root+属主可读），教训：该文件不要用 chmod 改权限，用 chown。
 - **通道健康三道防线**（回应对 decision 静默失败一整月无人发现的问责）：
   1. `llm.py` 全供应商链失败先落审计 `chainFail` 再抛异常（此前无日志只能靠调用方间接发现）；
