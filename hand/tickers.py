@@ -1,8 +1,15 @@
-# tickers.py — 产业链关联标的判定器（2026-11-10 运营拍板）
-# 定位：帖尾元数据索引，不属于正文创作。运营要求：不只列素材点名公司，
-# 覆盖产业链关联方（上游/下游/竞对/替代），按关联度、知名度排序，上限 10 只。
-# 安全边界（MoA 三岗共识保留项）：只标美股主上市白名单；标签恒中性；永不贴判断句；
-# 直接涉及与产业链关联分层标注；非白名单一律丢弃绝不猜码。
+# tickers.py — 产业链关联标的判定器 v4（2026-11-10 MoA 四岗汇总，运营拍板）
+# 结构（五段管线）：
+#   ①代码 direct 扫描器：素材(title+text)∪成稿正文 白名单别名命中 + 行业统称映射表
+#     ——确定性、永不失败、零 LLM。v3 漏 $TSM/$MU 的根因是检索活交给生成模型，此层根治。
+#   ②LLM 搜集：只产 chain（事件定性 + supplier/peer/cycle/customer/substitute + why），
+#     白名单内嵌 prompt（模型从菜单点选，不靠记忆）。
+#   ③代码硬校验：schema 逐行（role 枚举/why≤20字）→ 白名单精确查 → 中性词扫描
+#     → 结果性×customer 因果闸。坏行丢弃，不拖垮整批。
+#   ④LLM 校验（质检员）：verdict-only（keep/drop/fix，只删不改不增），fail-open。
+#   ⑤代码终审：去重(direct 优先)→排序→截10→分层拼行→长度预算。
+# 降级阶梯：direct+已校验chain → direct+未校验chain → direct-only → 空行；永不阻塞发布。
+# 安全边界（不变）：只标美股主上市白名单；标签恒中性；绝不猜码；不进首屏不贴落锤。
 import json
 import re
 
@@ -100,17 +107,16 @@ for _t, (_name, _fame, *_aliases) in WHITELIST.items():
 
 
 def resolve(name_or_ticker: str) -> str | None:
-    """公司名/别名/ticker → 白名单权威 ticker；查不到返回 None（宁缺毋错）。"""
+    """公司名/别名/ticker → 白名单权威 ticker；查不到返回 None（宁缺毋错）。
+    v4 起生产路径不再依赖本函数的模糊分支——扫描器正向匹配、LLM 输出精确查表；
+    保留给测试与人工排查工具。"""
     s = re.sub(r"[\s（）()·\.]", "", str(name_or_ticker or "")).lower()
     if not s:
         return None
     if s.startswith("$"):
         s = s[1:]
-    # 直接命中（已去空格/括号）
     if s in _ALIAS:
         return _ALIAS[s]
-    # 前缀/包含匹配兜底（"台积电(TSMC)"、"Nvidia Corp"）；
-    # 短查询（<4字）禁止"查询⊂别名"方向——防"腾讯"误中"腾讯音乐"（宁缺毋错）
     for alias, t in _ALIAS.items():
         if len(alias) < 3:
             continue
@@ -121,70 +127,226 @@ def resolve(name_or_ticker: str) -> str | None:
     return None
 
 
+def _exact(name_or_ticker: str) -> str | None:
+    """精确解析（生产用）：白名单/别名表命中才返回，模糊兜底一律 None。"""
+    s = re.sub(r"[\s（）()·\.]", "", str(name_or_ticker or "")).lower()
+    if s.startswith("$"):
+        s = s[1:]
+    return _ALIAS.get(s)
+
+
+# ── ① direct 扫描器（确定性） ──────────────────────────────────────────────
+# 拉丁别名用 ASCII 字母数字边界（CJK 字符视作边界，"NVDA大涨"能命中）；
+# ≤2 字符的 ticker（V/T/C/F/U/AI…）裸词误报面大，只认 $ 前缀（$V、$AI）；
+# CJK 别名子串匹配；最长别名优先（"腾讯音乐"先于"腾讯"类冲突）。
+def _build_scan():
+    rows = []
+    for t, (name, fame, *aliases) in WHITELIST.items():
+        for a in (name, t, *aliases):
+            if not a:
+                continue
+            if a.isascii():
+                if len(a) <= 2:
+                    pat = re.compile(rf"(?<![A-Za-z0-9])\${re.escape(a)}(?![A-Za-z0-9])", re.I)
+                else:
+                    pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(a)}(?![A-Za-z0-9])", re.I)
+                rows.append((a, t, pat))
+            else:
+                rows.append((a, t, None))  # CJK：直接子串
+    rows.sort(key=lambda r: len(r[0]), reverse=True)
+    return rows
+
+
+_SCAN = _build_scan()
+
+# 行业统称映射（v3 prompt 第二节整体搬进代码——查表内容不该每次推理重烧 token）
+INDUSTRY_MAP = {
+    "超大云厂商": ("AMZN", "MSFT", "GOOGL", "META"),
+    "云厂商": ("AMZN", "MSFT", "GOOGL", "META"),
+    "半导体设备商": ("ASML", "AMAT", "LRCX", "KLAC"),
+    "存储厂商": ("MU", "WDC", "STX"),
+    "AI芯片商": ("NVDA", "AMD", "AVGO", "MRVL"),
+    "消费电子巨头": ("AAPL",),
+    "电动车巨头": ("TSLA",),
+    "中国互联网巨头": ("BABA", "PDD", "JD"),
+    "加密货币": ("COIN", "MSTR", "MARA"),
+}
+
+
+def extract_direct(item, final_text=""):
+    """确定性 direct 抽取：素材(title+text) ∪ 成稿正文的白名单别名命中 + 行业统称映射。
+    返回 [(ticker, source)]，source ∈ named|industry。永不失败、零 LLM。"""
+    text = f"{item.get('title') or ''}\n{item.get('text') or ''}\n{final_text or ''}"
+    found = {}
+    for alias, t, pat in _SCAN:
+        hit = bool(pat.search(text)) if pat is not None else (alias in text)
+        if hit and t not in found:
+            found[t] = "named"
+    for phrase, tickers in INDUSTRY_MAP.items():
+        if phrase in text:
+            for t in tickers:
+                if t not in found:
+                    found[t] = "industry"
+    return sorted(found.items(), key=lambda kv: (WHITELIST[kv[0]][1], kv[0]))
+
+
+# ── ② LLM 搜集（chain 专用 prompt，白名单内嵌） ────────────────────────────
+_WL_LINES = "\n".join(
+    f"{t} {WHITELIST[t][0]}" + (f"（{'/'.join(a for a in aliases if a)}）" if aliases else "")
+    for t, (name, fame, *aliases) in WHITELIST.items())
+
+CHAIN_PROMPT = f"""你是美股产业链研究员。输入财经素材和已确定的直接涉及公司，你的唯一任务：找出素材未点名、但事件沿产业链真实传导到的关联上市公司（chain），每条给 ≤20 字传导理由。
+
+先给事件定性：结果性（营收/财报/出货数据=既有需求的确认）还是 变动性（涨价/断供/新技术/新协议/政策=改变成本、供给或格局）。
+
+传导方向（因果不倒置）：
+- supplier 上游供应商：主体扩产/需求上行→设备与材料商接单
+- peer 同行/竞争对手：景气互证，一家数据验证全行业周期
+- cycle 景气同向环节：事件确认某周期→同周期其他环节（AI资本开支→电力/散热/存储）
+- customer 下游客户：仅变动性事件且素材有涨价/断供/独家绑定信号时推，why 必须写明
+- substitute 替代者：技术路线之争的输家或新路线赢家
+
+候选池（ticker 只准从这个池里选，池外一律不输出）：
+{_WL_LINES}
+
+规则：chain 2-6 条，环节多样性优先；每条 why ≤20 字且必填，写传导机制不写观点；禁"受益/利好/利空/受损/承压/看多/看空"等方向词；直接涉及清单里的公司不得再输出；素材没有具体业务落点（无公司、产品、订单、金额、产能等实指，仅泛政策/泛趋势/征求意见）时 chain 必须为空——宁缺毋滥，不硬凑；除此之外全部环节都无真实关联才允许 chain 为空。
+只输出 JSON：{{"event_type":"结果性|变动性","chain":[{{"ticker":"","role":"supplier|peer|cycle|customer|substitute","why":"","relevance":"high|med"}}]}}"""
+
+# ── ④ LLM 校验（质检员，verdict-only，fail-open） ─────────────────────────
+VERIFY_PROMPT = """你是标的质检员，只挑错、不添新。输入素材与待核 chain 候选，逐条判断：
+1) why 所述传导在素材中有落点吗（素材没提的环节=空穴来风→drop）；
+2) role 与 event_type 因果方向一致吗（结果性事件配 customer→drop）；
+3) why 含方向词或空洞吗（→drop）；
+4) 素材为泛政策/泛趋势且无具体落点（无公司、产品、订单、金额、产能实指）时全部 drop——宁缺毋滥。
+证据不足宁可错杀。只输出 JSON：{"verdicts":[{"ticker":"","action":"keep|drop|fix","role":"仅在fix时给新role","reason":"≤15字"}]}"""
+
 _REL = {"high": 0, "med": 1, "medium": 1, "low": 2}
-
-PROMPT = """你是美股产业关联判定器。输入一篇财经素材，判断事件沿产业链真实传导到哪些知名美股上市公司。目标：每帖给出 3-8 个真实关联（direct+chain 合计）；只有素材与任何美股上市公司都无真实关联时才允许清单为空——不要因为谨慎而交白卷。
-
-一、先给事件定性：结果性事件（营收/财报/出货数据=既有需求的确认）还是变动性事件（涨价/断供/新技术/新协议/政策=改变某方的成本、供给或竞争格局）。
-
-二、素材明示的行业统称必须映射为具体公司并归入 direct：超大云厂商→AMZN/MSFT/GOOGL/META；半导体设备商→ASML/AMAT/LRCX/KLAC；存储厂商→MU/WDC/STX；AI芯片商→NVDA/AMD/AVGO/MRVL；消费电子巨头→AAPL；电动车→TSLA；中国互联网→BABA/PDD/JD；矿机/加密→COIN/MSTR/MARA。素材点名对照方/被比较方（如"芯片商CDS vs 云厂商"）时，对照双方都是 direct。
-
-三、结果性事件的 chain 传导方向（因果不倒置）：
-- supplier 上游供应商：主体扩产/需求上行→设备与材料商接单受益（营收飙→ASML/AMAT/LRCX/KLAC）。
-- peer 同行/竞争对手：景气度互证，一家的数据验证全行业周期。
-- cycle 景气同向环节：事件确认某条周期时，同周期其他环节（AI资本开支→电力VRT/VST/CEG、散热、存储）。
-- customer 下游客户：默认不推——客户需求是结果性事件的原因不是被改变方；仅当事件改变客户成本/供给/议价（涨价/断供/独家绑定）时推，why 必须写明。
-- substitute 替代者：事件削弱某技术路线时的输家或新路线赢家。
-每个环节取 1-2 家最强代表，环节多样性优先于数量；全部环节都无真实关联才留空。
-
-四、只输出在 NYSE 或 NASDAQ 主板上市的公司；中国大陆/香港公司仅当存在美股主上市 ADR（如阿里巴巴=BABA）；ETF、OTC、未上市公司（字节/OpenAI/DeepSeek/智谱/xAI）一律不输出。
-五、每个关联必须给 role 和 why（≤20字传导机制），给不出 why 就不列。relevance：high=核心主体或直接传导，med=明确环节（low 不输出）。
-只输出 JSON：{"event_type":"结果性|变动性","direct":[{"company":"","ticker":"","relevance":"high|med"}],"chain":[{"company":"","ticker":"","role":"supplier|peer|cycle|customer|substitute","why":"","relevance":"high|med"}]}"""
+_ROLES = {"supplier", "peer", "cycle", "customer", "substitute"}
+_NEUTRAL_RE = re.compile(r"受益|利好|利空|受损|承压|跑赢|看多|看空|大涨|暴跌|爆仓|血洗|崩盘")
 
 
-def related_tickers(llm, item, cap=10):
-    """LLM 判定 + 白名单校验。返回 [(ticker, kind)]，kind ∈ direct|chain；
-    按直接涉及→关联度→知名度排序，截断 cap。未知公司丢弃并记日志（含 why 便于审计）。"""
-    material = f"{item.get('title') or ''}\n{(item.get('text') or '')[:4000]}"
-    out = llm.chat("decision", PROMPT, material, max_tokens=1200, timeout=45, retries=1)
-    s = (out or "").strip()
-    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s)
+def _parse_json(out):
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", (out or "").strip())
     try:
         d = json.loads(s)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", s, re.S)
-        if not m:
-            log_event("tickers", "wcixot", action="parseFail", note=str(out)[:80])
-            return []
         try:
-            d = json.loads(m.group(0))
+            d = json.loads(m.group(0)) if m else None
         except json.JSONDecodeError:
-            log_event("tickers", "wcixot", action="parseFail", note=str(out)[:80])
-            return []
-    entries, dropped, whys = [], [], []
-    for kind in ("direct", "chain"):
-        for row in (d.get(kind) or []):
-            if not isinstance(row, dict):
+            d = None
+    return d if isinstance(d, dict) else None
+
+
+def _chain_rows(llm, material, direct_list):
+    """LLM 搜集 + ③代码硬校验。返回 (event_type, rows)；rows 元素 {t,role,why,rel}。"""
+    user = (f"素材：\n{material}\n\n"
+            f"直接涉及（不得重复输出）：{' '.join(direct_list) if direct_list else '无'}")
+    try:
+        out = llm.chat("decision", CHAIN_PROMPT, user, max_tokens=800, timeout=40, retries=1)
+    except Exception as e:
+        log_event("tickers", "wcixot", action="chainSkip", note=str(e)[:100])
+        return "", []
+    d = _parse_json(out)
+    if d is None:
+        log_event("tickers", "wcixot", action="parseFail", note=str(out)[:80])
+        return "", []
+    ev = str(d.get("event_type") or "")
+    rows, dropped, whys, seen = [], [], [], {}
+    for row in (d.get("chain") or []):
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("ticker") or "").strip()
+        t = _exact(raw)
+        if not t:
+            dropped.append(f"{raw[:16]}:非白名单")
+            continue
+        role = str(row.get("role") or "").strip().lower()
+        why = str(row.get("why") or "").strip()
+        rel = _REL.get(str(row.get("relevance") or "med").lower(), 1)
+        reason = None
+        if role not in _ROLES:
+            reason = "role非法"
+        elif not why or len(why) > 20:
+            reason = "why缺失/超长"
+        elif _NEUTRAL_RE.search(why):
+            reason = "why方向词"
+        elif ev == "结果性" and role == "customer":
+            reason = "结果性×customer"
+        if reason:
+            dropped.append(f"{t}:{reason}")
+            continue
+        if t in seen:                       # 同 ticker 跨 role：保留关联度更高者
+            if seen[t]["rel"] <= rel:
                 continue
-            t = resolve(row.get("company") or row.get("ticker") or "")
-            if not t:
-                dropped.append(str(row.get("company") or row.get("ticker"))[:20])
-                continue
-            rel = _REL.get(str(row.get("relevance") or "med").lower(), 1)
-            fame = WHITELIST[t][1]
-            entries.append({"t": t, "kind": kind, "key": (0 if kind == "direct" else 1, rel, fame, t)})
-            if kind == "chain" and row.get("why"):
-                whys.append(f"{t}:{str(row.get('role') or '?')}/{str(row['why'])[:18]}")
-    # 同 ticker 去重：direct 优先保留
-    seen = {}
-    for e in entries:
-        if e["t"] not in seen or e["kind"] == "direct":
-            seen[e["t"]] = e
-    ranked = sorted(seen.values(), key=lambda e: e["key"])[:cap]
+            rows.remove(seen[t])
+        e = {"t": t, "role": role, "why": why, "rel": rel}
+        seen[t] = e
+        rows.append(e)
+        whys.append(f"{t}:{role}/{why[:18]}")
     if dropped:
-        log_event("tickers", "wcixot", action="droppedNonWhitelist", note=";".join(dropped)[:120])
+        log_event("tickers", "wcixot", action="rowDropped", note=";".join(dropped)[:160])
     if whys:
         log_event("tickers", "wcixot", action="chainWhy", note=";".join(whys)[:200])
+    return ev, rows
+
+
+def _verify_chain(llm, material, ev, rows):
+    """④ 质检员：verdict-only。drop→删行，fix→改 role，其余 keep。
+    任何失败 fail-open 放行（宁可放过不可错杀），绝不阻塞发布。"""
+    if not rows:
+        return rows
+    listing = "\n".join(f"{r['t']} {r['role']}｜{r['why']}" for r in rows)
+    user = f"素材：\n{material[:1500]}\n\nevent_type：{ev or '未知'}\n待核候选：\n{listing}"
+    try:
+        out = llm.chat("decision", VERIFY_PROMPT, user, max_tokens=400, timeout=30, retries=0)
+    except Exception as e:
+        log_event("tickers", "wcixot", action="verifySkip", note=str(e)[:80])
+        return rows
+    d = _parse_json(out)
+    verdicts = {}
+    if d:
+        for v in (d.get("verdicts") or []):
+            if isinstance(v, dict) and v.get("ticker"):
+                verdicts[str(v["ticker"]).strip().upper()] = v
+    if not verdicts:
+        log_event("tickers", "wcixot", action="verifySkip", note="verdicts空/解析失败")
+        return rows
+    kept, applied = [], []
+    for r in rows:
+        v = verdicts.get(r["t"])
+        act = str((v or {}).get("action") or "").lower()
+        if act == "drop":
+            applied.append(f"drop {r['t']}:{str(v.get('reason') or '')[:12]}")
+            continue
+        if act == "fix" and str(v.get("role") or "").lower() in _ROLES:
+            applied.append(f"{r['t']}→{str(v['role']).lower()}")
+            r = {**r, "role": str(v["role"]).lower()}
+        kept.append(r)
+    if applied:
+        log_event("tickers", "wcixot", action="verifyApplied", note=";".join(applied)[:160])
+    return kept
+
+
+def related_tickers(llm, item, final_text="", cap=10):
+    """v4 五段管线主入口。返回 [(ticker, kind)]，kind ∈ direct|chain；
+    排序 直接涉及→关联度→知名度→字母，截 cap。"""
+    material = f"{item.get('title') or ''}\n{(item.get('text') or '')[:4000]}"
+    direct = extract_direct(item, final_text)
+    if direct:
+        log_event("tickers", "wcixot", action="directScan",
+                  note=";".join(f"{t}:{s}" for t, s in direct)[:160])
+    ev, rows = _chain_rows(llm, material, [t for t, _ in direct])
+    rows = _verify_chain(llm, material, ev, rows)
+    entries = {}
+    for t, _src in direct:
+        entries[t] = {"t": t, "kind": "direct", "key": (0, 0, WHITELIST[t][1], t)}
+    for r in rows:
+        if r["t"] in entries:              # direct 优先，chain 不覆盖
+            continue
+        entries[r["t"]] = {"t": r["t"], "kind": "chain",
+                           "key": (1, r["rel"], WHITELIST[r["t"]][1], r["t"])}
+    ranked = sorted(entries.values(), key=lambda e: e["key"])[:cap]
     return [(e["t"], e["kind"]) for e in ranked]
 
 
@@ -202,9 +364,9 @@ def format_line(pairs):
 
 
 def apply_ticker_line(text, llm, item, max_len=None):
-    """帖尾追加标的行（编辑后、互关tag前）。超长度预算自动放弃。
-    返回 (最终文本, 标的行或"")。"""
-    pairs = related_tickers(llm, item)
+    """帖尾追加标的行（编辑后、互关tag前）。text 即最终成稿，一并参与 direct 扫描。
+    超长度预算自动放弃。返回 (最终文本, 标的行或"")。"""
+    pairs = related_tickers(llm, item, final_text=text, cap=10)
     line = format_line(pairs)
     if not line:
         return text, ""

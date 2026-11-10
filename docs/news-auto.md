@@ -169,10 +169,17 @@ python /opt/xar/hand/news_auto.py
 
 **恢复实证**：pos 手动推进清 4 天积压后，11-10 11 点桶 43 候选→入选 5→5 张票全部 `done·新发`（`policy:news-auto` 批准），FxTwitter 核到 5 条真实上线（11:18–11:21）。auto 链路首次完整实证。
 
-## 产业链关联标的判定器（2026-11-10 运营拍板）
+## 产业链关联标的判定器（2026-11-10 运营拍板；v4 五段管线当日上线）
 
-- **运营要求**：帖尾不只列素材点名公司，覆盖产业链关联方（上游/下游/竞对/替代），按关联度、知名度排序，上限 10 只。经 MoA（K3+grok+codex）三岗讨论定安全框架后实施。
-- `hand/tickers.py`：LLM 决策通道判定 direct（素材明示直接主体）/chain（产业链关联）→ 美股主上市白名单（150 家，NYSE/NASDAQ 含 ADR；ETF/OTC/未上市不入表）权威校验 → 排序（直接→关联度→知名度）→ 截断 10 → 帖尾一行分层标注：`涉及标的：$TSM｜关联：$NVDA $AAPL`。
-- 非白名单公司一律丢弃并记日志（`droppedNonWhitelist`），绝不猜码；坏输出安全返回空；超长度预算自动放弃。追加位置在编辑 accept 之后、互关 tag 之前（等同排版操作，不进作者/编辑提示词）。
-- 三岗共识保留项：标签恒中性（禁"受益/利好/可关注/布局/埋伏"方向词，作者正文违反由编辑红线打回）；不进首屏、永不贴落锤；直接涉及与产业链关联分层标注；月度抽检"带标的帖占比"与评论区"求代码/跟买"语义占比，荐股脸预警即降频。
-- 白名单缺口按实测滚动补齐（首跑补 RKLB/IRDM/TMUS/SONY/WDC 等 12 家）；作者层 $代码仍限素材明示（author-system 硬底线），产业链扩展只发生在机器层。
+- **运营要求**：帖尾覆盖"消息原文直接挂钩标的 + 消息影响/影射标的"，按关联度、知名度排序，上限 10 只。经两轮 MoA（K3+grok+codex；grok+astra+cursor/kimi-for-coding+k3）定框架后实施。
+- **v4 五段管线**（v3 单次 LLM 全责结构的重构，根因：检索活交给生成模型——kimi→GLM 换链后 3 案例漏 2 个素材主体 $TSM/$MU）：
+  1. **代码 direct 扫描器**（确定性，永不失败）：素材(title+text)∪成稿正文白名单别名匹配（拉丁 ASCII 边界/CJK 子串/≤2 字符 ticker 只认 $ 前缀）+ 行业统称映射表 INDUSTRY_MAP（"超大云厂商"→AMZN/MSFT/GOOGL/META 等，从 prompt 搬进代码）。漏 $TSM/$MU 在结构上不可能再发生。
+  2. **LLM 搜集**（chain 专用 prompt）：白名单 150 家内嵌 prompt（模型从菜单点选），只产 event_type + chain（supplier/peer/cycle/customer/substitute + ≤20字 why）；素材无具体业务落点（泛政策/泛趋势）时 chain 必须为空，宁缺毋滥。
+  3. **代码硬校验**：schema 逐行（role 枚举/why≤20字）→ 白名单精确查（`_exact`，模糊 resolve 退役出生产路径）→ 中性词扫描（受益/利好/利空等 13 词）→ 结果性×customer 因果闸。坏行丢弃不拖垮整批。
+  4. **LLM 校验（质检员）**：verdict-only（keep/drop/fix，只删不增），复核素材落点/因果方向/泛政策全 drop；任何失败 fail-open 放行，绝不阻塞发布。
+  5. **代码终审**：去重（direct 优先）→ 排序（直接→关联度→知名度→字母）→ 截 10 → 分层拼行（`涉及标的：$TSM｜关联：$ASML`）→ 长度预算。
+- **降级阶梯**：direct+已校验 chain → direct+未校验 chain → direct-only → 空行；全系统无任何路径阻塞发布或裸奔。
+- **金标回归库**（`tests/tickers_golden.py`，LIVE_LLM=1 门控）：台积电案（direct 必含 TSM/AAPL/NVDA/统称映射四设备商）、存储案（MU 必中、WDC 不进 direct）、CDS 案、无关联负例（泛政策→空）。**换模型/换供应商/改 chain prompt 前必跑，不过不放行**（制度化防 kimi→GLM 式裸奔换链）。
+- 首跑金标实证 4/4：收紧"宁缺毋滥"后存储案/CDS案 chain 为空是正确行为（v3 会凑 WDC 类）；泛政策负例不再凑电力股。
+- 保留项不变：白名单只收 NYSE/NASDAQ 主板（含 ADR）；ETF/OTC/未上市不入表；标签恒中性；不进首屏不贴落锤；月度荐股脸抽检；作者层 $代码仍限素材明示（author-system 硬底线），产业链扩展只发生在机器层。
+- 审计日志：directScan / chainWhy / rowDropped / verifyApplied / verifySkip / parseFail / chainSkip / skipLenBudget（P2 待接日聚合：droppedNonWhitelist topN 驱动白名单增补、chainWhy 抽样进日报）。
