@@ -36,6 +36,25 @@ from quality import check as quality_check  # noqa: E402
 WRITE_KINDS = {"post", "reply", "comment", "like", "follow", "unfollow"}
 PRIORITY = {"post": 0, "reply": 1, "comment": 1, "like": 2, "follow": 2, "unfollow": 2, "browse": 3}
 
+# engage 浇灌模板池（mtime 缓存读取 instance.yaml patrol.engage_pool）
+_ENGAGE_POOL_CACHE = {"mtime": 0, "pool": set()}
+
+
+def _engage_pool():
+    import yaml
+    from pathlib import Path as _P
+    p = _P("/etc/xar/instance.yaml")
+    try:
+        m = p.stat().st_mtime
+        if m != _ENGAGE_POOL_CACHE["mtime"]:
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            _ENGAGE_POOL_CACHE["pool"] = set(
+                str(x) for x in ((cfg.get("patrol") or {}).get("engage_pool") or []))
+            _ENGAGE_POOL_CACHE["mtime"] = m
+    except Exception:
+        pass
+    return _ENGAGE_POOL_CACHE["pool"]
+
 
 def _validate_post_options(intent):
     """多图/引用只作为 post 的可选载荷；本地媒体白名单+魔数，杜绝任意URL/路径。"""
@@ -183,6 +202,28 @@ class Gateway:
             # 蓝 V 长文权限由账号实时状态+24h缓存决定；非蓝 V 保持 280 硬上限
             from account_status import post_max_len
             qopts["max_len"] = post_max_len(self.ledger.account)
+        # engage 浇灌评论专用档（互关巡逻引擎，2026-11-11 运营拍板：模板/LLM 双路由）：
+        # template=池内模板原句放行（仪式性短评，豁免长度/相似度/emoji——模板会天天重复，
+        # 相似度检查必杀，这里按配置池成员资格放行）；llm=短评按 casual 档+80字帽走常规门
+        if kind == "comment" and intent.get("engage"):
+            mode = str(intent.get("engage"))
+            if mode == "template":
+                if text.strip() not in _engage_pool():
+                    log_event("server", self.ledger.account, action="qualityReject",
+                              kind=kind, reason="engage模板不在配置池")
+                    raise Deny("QUALITY_REJECT", "engage 模板不在配置池（patrol.engage_pool）")
+                out = dict(intent)
+                out["text"] = text.strip()
+                return out
+            r = quality_check(text, history=self._history_texts(),
+                              casual=True, max_len=160, min_len=8)
+            if not r["ok"]:
+                log_event("server", self.ledger.account, action="qualityReject",
+                          kind=kind, reason=f"engage:{r['reason']}")
+                raise Deny("QUALITY_REJECT", r["reason"])
+            out = dict(intent)
+            out["text"] = r["cleaned"]
+            return out
         r = quality_check(text, history=self._history_texts(),
                           casual=bool(intent.get("casual")), **qopts)
         if not r["ok"]:
@@ -546,7 +587,8 @@ def make_handler(gw: Gateway, resident):
                     if resident is None or resident.ctx is None:
                         return self._send(503, {"error": "workstation_down"})
                     return self._send(200, _update_profile(resident, body))
-                if self.path in ("/read/timeline", "/read/post", "/read/profile", "/read/notifications"):
+                if self.path in ("/read/timeline", "/read/post", "/read/profile",
+                                 "/read/notifications", "/read/search"):
                     if resident is None or resident.ctx is None:
                         return self._send(503, {"error": "workstation_down"})
                     return self._send(200, _read(resident, self.path, body))
@@ -633,6 +675,22 @@ def _read(resident, path, body):
                         P.human_scroll(page, 600)
                         P.sleep(1200)
                     return {"posts": P.collect_posts(page, min(body.get("limit", 20), 30))}
+                if path == "/read/search":
+                    # 关键词搜索读原语（互关巡逻引擎的候选源，2026-11-11）
+                    import urllib.parse as _up
+                    q = str(body.get("q") or "").strip()
+                    if not q:
+                        return {"error": "missing q"}
+                    tab = "live" if body.get("tab") == "live" else "top"
+                    url = (f"https://x.com/search?q={_up.quote(q)}"
+                           f"&src=typed_query&f={tab}")
+                    if not P.goto_feed(page, url, must_have_article=False):
+                        return {"error": "search_load_failed"}
+                    P.sleep(2500)
+                    for _ in range(3):
+                        P.human_scroll(page, 600)
+                        P.sleep(1200)
+                    return {"posts": P.collect_posts(page, min(int(body.get("limit", 30)), 40))}
                 # /read/post
                 url = body.get("url") or f"https://x.com/i/web/status/{body.get('status_id')}"
                 sid = str(body.get("status_id") or "")

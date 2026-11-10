@@ -8,6 +8,15 @@
 - **origin 三态约定**（与额度/排队联动）：`manual`=运营者增量任务（豁免额度+排队-1级）；`chain:<id>`=该链 auto 产出（正常计额度、按 kind 四级排队）；缺省=主脑散帖/其他。深度文链的票 origin=`chain:deep`。
 - **新增链 runbook**：①chains.py `_ENGINES` 注册引擎（或复用 news_auto）→ ②instance.yaml `chains:` 加段（display/budget/length/贴标开关）→ ③引擎内 `chains.get(<id>)` 读配置驱动产线 → ④测试（chains_test 扩展）→ ⑤金标/回归过门再启用。
 
+## 互关关键词巡逻引擎（2026-11-11 运营立项，参考 x-auto-tool 激进档）
+
+- **定位**：主动互动供血引擎——搜互关 tag 候选 → 过滤 → 关注+浇灌评论 → 池子滚雪球，解"通知无事件/种子池空"的冷启动死结。此前 48h 互动实盘为零的根因即无此引擎。
+- **节拍**（`hand/patrol.py` + xar-patrol.timer）：活跃窗内 60-90 分钟一拍（state 自管 next_beat_at，窗外静默）；每拍：`/read/search`（新原语，live tab）搜 `#蓝V互关 #交朋友 #浇朋友 #互关` 轮换 → 候选过滤（本人/黑名单/已关注/7天作者冷却/去重）→ **决策模型批路由**（高质帖→LLM 现写 `comment-engage` 场景；低质帖→模板池，运营拍板"去掉'1'类低质"，池：浇一浇/互关一下/串门来了/已关回关啦/互关互关）→ 关注+浇灌评论成对执行（动作间隔 20s，连败 3 熔断本拍）。
+- **量**：follow 帽 180/日（budget_24h）；comment 帽 **60→80**（对齐 x-auto-tool）；LLM 现写每拍上限 3（成本与节奏护栏）；通知回关每拍上限 5（cognitive._try_inbox 提量，原每拍 1）。
+- **质量门 engage 档**（server._quality_gate 专用分支）：template=池内原句放行（仪式性短评豁免长度/相似度/emoji——模板天天重复必撞相似度检查，按配置池成员资格放行）；llm=casual 档+80字加权帽走常规门。池外模板一律拒。
+- **票道零绕行**：全部走 /execute（幂等键由候选帖 sid 派生天然去重/工位串行/预算帽），origin=`chain:patrol` 计额度、正常排队（comment 1 级/follow 2 级，不挡深度文 0 级）。审计 task=patrol：searched/engaged/failAbort/capHold/wsDown 全留痕，进日报聚合。
+- 关系记账：关注后 `set_we_follow` 回填（新 API），对方回关时既有 `set_they_follow` 双向确认升 mutual 档 → 串门评论/熟人口吻场景自动有米。
+
 ## 任务边界
 
 固定信息库只有数据站的 **资讯、精品文章**。调度器负责增量评分和每小时择优；成稿由 `post-original` 场景完成。没有合格增量时允许 0 条，不为凑数降低标准。

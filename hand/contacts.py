@@ -112,6 +112,18 @@ class Contacts:
                 p["tier"] = "mutual"
             self.save()
 
+    def set_we_follow(self, handle: str, we: bool = True):
+        """我方关注动作回填 we_follow（互关巡逻引擎 2026-11-11）；
+        双方关注都确认才升互关档。"""
+        with file_lock(self.path):
+            self._load()
+            p = self._p(handle)
+            p["we_follow"] = we
+            p["updated_at"] = datetime.now().isoformat()[:19]
+            if we and p.get("they_follow") and p["tier"] == "normal":
+                p["tier"] = "mutual"
+            self.save()
+
     # ── 熟络度（butcher 借入：累计互动计数轴） ──
     def familiar(self, handle: str) -> str:
         with file_lock(self.path):

@@ -81,6 +81,23 @@ chains:                      # 多链内容生产框架（2026-11-10 运营立�
   #   ticker_line: false
   #   growth_tags: {enabled: true, prob: 0.5}
 
+patrol:                      # 互关关键词巡逻引擎（2026-11-11 运营立项，参考 x-auto-tool 激进档）
+  enabled: true
+  keywords: ["#蓝V互关", "#交朋友", "#浇朋友", "#互关"]
+  engage_per_beat: 10        # 每拍关注+浇灌对数（帽由 budget_24h 管：follow 180/comment 80）
+  llm_per_beat: 3            # 每拍最多 LLM 现写浇灌条数（决策模型裁定高质帖，其余走模板池）
+  followback_per_beat: 5     # 通知回关每拍上限（cognitive 读）
+  beat_minutes: [60, 90]     # 节拍间隔
+  action_gap_sec: 20         # 拍内动作间隔（风控）
+  author_cooldown_days: 7    # 同作者冷却
+  fail_abort: 3              # 连续失败熔断本拍
+  engage_pool:               # 模板池（运营拍板去掉"1"类低质；模板=池内原句放行质量门）
+    - "浇一浇"
+    - "互关一下"
+    - "串门来了"
+    - "已关，回关啦"
+    - "互关互关"
+
 news_auto:
   mode: review              # review|auto；auto 仅资讯原创，其他动作不受影响
   structured_gate: shadow   # shadow|enforce；先用真实采纳数据对账再转正

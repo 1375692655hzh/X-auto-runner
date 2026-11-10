@@ -297,6 +297,17 @@ def _try_inbox(llm, account, handle, st, pool):
         ib.mark_consumed(nid)
         log_event("cognitive", account, action="deny", scene=scene, note=str(res)[:240])
 
+    # 回关批量：每拍上限读 patrol.followback_per_beat（互关巡逻引擎配套，默认5；
+    # 原每拍1票口径 2026-11-11 随巡逻引擎提量，参考 x-auto-tool followback_per_beat）
+    fb_limit = 5
+    try:
+        import yaml as _yml
+        _pc = (_yml.safe_load(open("/etc/xar/instance.yaml", encoding="utf-8"))
+               or {}).get("patrol") or {}
+        fb_limit = max(1, int(_pc.get("followback_per_beat", 5)))
+    except Exception:
+        pass
+    fb_done = 0
     for e in [x for x in events if x["kind"] == "follow"]:
         nid, author = e["notification_id"], e["actor"]
         if not author:
@@ -316,13 +327,16 @@ def _try_inbox(llm, account, handle, st, pool):
             ib.mark_consumed(nid)
             log_event("cognitive", account, action="followbackTicket",
                       ticket=res.get("ticket_id") or iid, status=status)
-            return True
+            fb_done += 1
+            if fb_done >= fb_limit:
+                return True
+            continue
         code = (res.get("denied") or {}).get("code")
         if code in ("CAP_EXHAUSTED", "WORKSTATION_DOWN", "QUEUE_TIMEOUT"):
             log_event("cognitive", account, action="inboxRetry", scene="followback", code=code)
             return True
         ib.mark_consumed(nid)
-    return False
+    return fb_done > 0
 
 
 def _try_reply(llm, account, handle, st, pool):
