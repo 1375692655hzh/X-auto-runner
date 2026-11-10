@@ -152,6 +152,7 @@ python /opt/xar/hand/news_auto.py
 
 ## 开跑（2026-11-09 运营拍板）
 
+- **人工任务豁免额度（2026-11-10 晚运营拍板）**：QQ 人工命令（`发帖/回复/关注/取关`，即 manual-* 票）是运营者**增量任务，绝不套任何量约束**——三道预算门全部豁免：`_gates`/`_perform` 的 CAP 检查跳过、`mark_intent` 不记账（`count_quota=False`）、`tickets.create` 不预留（票面直接标 `released=True`，终局释放跳过，不多释放挤占 auto 池）。质量门/幂等/工位串行等其他安全闸照常。auto 任务照旧受 budget_24h 约束——池子只管机器，管不到运营者的手。
 - `news_auto.mode: review → auto`：资讯原创全自动直发（时效 6h/24h、unknown/连败熔断、闭环落账同步生效）。配置备份 `instance.yaml.bak-20261109-auto`。
 - approval 按 kind 配置：reply/comment/follow=none（互动全自动，质量门与预算帽仍拦截）；post 的 auto 仅由 news_auto 授权路径批准，旧 review 票不追溯放行。
 - budget_24h 对齐 x-auto-tool 任务量：post 10 / reply 20 / comment 60 / like 30 / follow 180 / unfollow 0（24h 滚动帽）。

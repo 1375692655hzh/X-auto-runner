@@ -29,14 +29,18 @@ class Tickets:
     def _path(self, tid):
         return self.dir / f"{tid}.json"
 
-    def create(self, kind: str, payload: dict, rationale: str = "") -> dict:
-        """开票 + 预算预留（kimi §四.4 之①）。开不出（额度尽/键冲突）抛 TicketError。"""
+    def create(self, kind: str, payload: dict, rationale: str = "",
+               reserve_quota: bool = True) -> dict:
+        """开票 + 预算预留（kimi §四.4 之①）。开不出（额度尽/键冲突）抛 TicketError。
+        reserve_quota=False 用于 origin=manual（运营者增量任务，豁免额度）：
+        不预留且直接标 released=True——后续 expire/finish 的释放据此跳过，
+        绝不多释放挤占 auto 池（2026-11-10 运营拍板）。"""
         tid = payload.get("intent_id")
         if not tid:
             raise TicketError("缺 intent_id")
         if self._path(tid).exists():
             raise TicketError(f"幂等键已存在: {tid}")
-        if not self.ledger.reserve(kind, 1, tid):
+        if reserve_quota and not self.ledger.reserve(kind, 1, tid):
             raise TicketError(f"{kind} 预算预留失败（额度尽）")
         doc = {
             "id": tid, "kind": kind, "payload": payload, "rationale": rationale[:400],
@@ -44,6 +48,8 @@ class Tickets:
             "status": "pending_review", "created_at": _now(),
             "expires_at": (datetime.now(timezone.utc) + timedelta(hours=TTL_HOURS.get(kind, 1))).isoformat(),
         }
+        if not reserve_quota:
+            doc["released"] = True   # 未预留：终局释放直接跳过
         _atomic_write(self._path(tid), doc)
         log_event("tickets", self.ledger.account, action="create", ticket=tid, kind=kind)
         return doc

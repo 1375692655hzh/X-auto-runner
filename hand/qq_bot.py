@@ -515,6 +515,7 @@ class Bot:
                            "status_id": sid, "post_url": f"https://x.com/{author}/status/{sid}",
                            "target_handle": author,
                            "target_len": len(detail["post"].get("text") or ""),
+                           "origin": "manual",
                            "rationale": "运营者 QQ 人工回复；线程转人工接管"}
                 r = self.xc("POST", "/execute", payload)
                 if r.get("status") == "pending_review":
@@ -531,6 +532,7 @@ class Bot:
                     return
                 iid = f"manual-post-{int(time.time())}"
                 payload = {"kind": "post", "intent_id": iid, "text": text,
+                           "origin": "manual",  # 增量任务：豁免滚动额度（2026-11-10 运营拍板）
                            "rationale": "运营者直发（QQ 人工帖）"}
                 r = self.xc("POST", "/execute", payload)
                 if r.get("status") == "pending_review":
@@ -556,6 +558,7 @@ class Bot:
                 iid = f"manual-{'fo' if follow else 'unfo'}-{int(time.time())}"
                 payload = {"kind": "follow" if follow else "unfollow",
                            "intent_id": iid, "target_handle": who,
+                           "origin": "manual",
                            "rationale": f"运营者指令{'关注' if follow else '取关'}"}
                 r = self.xc("POST", "/execute", payload)
                 if r.get("status") == "pending_review":

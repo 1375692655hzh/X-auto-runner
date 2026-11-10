@@ -287,10 +287,14 @@ class Intents:
         doc["updated_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write(p, doc)
 
-    def mark_intent(self, intent_id: str) -> None:
-        """发送前调用：落 intent 态=可能已发出的证据；动作尝试即计额度"""
+    def mark_intent(self, intent_id: str, count_quota: bool = True) -> None:
+        """发送前调用：落 intent 态=可能已发出的证据；动作尝试即计额度。
+        count_quota=False 用于运营者手动任务（origin=manual）：状态证据照落、
+        幂等照管，但不占滚动额度——人工加稿是增量任务，绝不套量约束
+        （2026-11-10 运营拍板：池子只管 auto，人工被 auto 挤占不可接受）。"""
         self.mark(intent_id, "intent")
-        self.ledger.record(self._kind_of(intent_id))
+        if count_quota:
+            self.ledger.record(self._kind_of(intent_id))
         if CRASH_AFTER_INTENT:
             os._exit(70)  # 测试钩子：写完 intent 即崩（验收"杀进程三次"用）
 

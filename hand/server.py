@@ -166,7 +166,10 @@ class Gateway:
         t = self.tickets.get(iid)
         own = 1 if (t or {}).get("kind") == kind and (t or {}).get("status") in (
             "pending_review", "approved", "executing") else 0
-        if self.ledger.cap_left(kind) + own <= 0:
+        # origin=manual（运营者手动加稿/直发）：增量任务，豁免滚动额度——
+        # 池子只约束 auto，人工被 auto 挤占不可接受（2026-11-10 运营拍板）。
+        # 其余闸（幂等/质量/工位串行）照常。
+        if intent.get("origin") != "manual" and self.ledger.cap_left(kind) + own <= 0:
             raise Deny("CAP_EXHAUSTED", f"{kind} 滚动24h额度用尽（fail-closed）")
         if not self.writes_enabled and not SIMULATE and not intent.get("dry"):
             raise Deny("WRITES_DISABLED", "写动作未启用（runtime.writes.enabled，红线 §二）")
@@ -276,7 +279,8 @@ class Gateway:
                 t = self.tickets.get(iid)
                 if t is None:
                     self.tickets.sweep_expired()
-                    self.tickets.create(kind, intent, intent.get("rationale", ""))
+                    self.tickets.create(kind, intent, intent.get("rationale", ""),
+                                        reserve_quota=intent.get("origin") != "manual")
                     log_event("server", self.ledger.account, action="ticketCreate",
                               kind=kind, ticket=iid)
                     self.tickets.decide(iid, True, by="policy:approval-none")
@@ -290,7 +294,8 @@ class Gateway:
                 self.tickets.sweep_expired()
                 t = self.tickets.get(iid)
                 if t is None:
-                    tk = self.tickets.create(kind, intent, intent.get("rationale", ""))
+                    tk = self.tickets.create(kind, intent, intent.get("rationale", ""),
+                                             reserve_quota=intent.get("origin") != "manual")
                     log_event("server", self.ledger.account, action="ticketCreate",
                               kind=kind, ticket=iid)
                     if auto:
@@ -343,10 +348,11 @@ class Gateway:
         """单飞工作线程内执行（唯一串行段——权威额度/幂等检查在此，入口闸只是快路径）
         SIMULATE=状态机全走；dry=过闸即返零副作用；真实写=票据执行段"""
         kind, iid = intent["kind"], intent["intent_id"]
+        manual = intent.get("origin") == "manual"   # 人工加稿：豁免额度（同 _gates 口径）
         t = self.tickets.get(iid)
         own = 1 if (t or {}).get("kind") == kind and (t or {}).get("status") in (
             "pending_review", "approved", "executing") else 0
-        if self.ledger.cap_left(kind) + own <= 0:
+        if not manual and self.ledger.cap_left(kind) + own <= 0:
             # 权威检查（防并发 TOCTOU 超额）；本票自身活跃预留不双重计（同 _gates 口径）
             raise Deny("CAP_EXHAUSTED", f"{kind} 滚动24h额度用尽（fail-closed）")
         if intent.get("dry"):
@@ -357,7 +363,7 @@ class Gateway:
                                          if k not in ("dry", "rationale")})
         except ValueError:
             raise Deny("IDEMPOTENCY_CONFLICT", f"幂等键已存在: {iid}（同票最多一次）")
-        self.intents.mark_intent(iid)  # exactly-once ①：执行前落 intent + 占额度
+        self.intents.mark_intent(iid, count_quota=not manual)  # exactly-once ①：执行前落 intent；manual 不占额度
         if SIMULATE:
             self.intents.mark(iid, "done", "")
             return {"intent_id": iid, "status": "done", "simulated": True}
