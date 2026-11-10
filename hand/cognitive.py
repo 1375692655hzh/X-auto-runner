@@ -626,12 +626,14 @@ def _try_post(llm, account, st):
     if skipped or not text:
         log_event("cognitive", account, action="skip", scene="post-original")
         return False
+    from news_auto import _apply_growth_tags
+    text, growth_tagged = _apply_growth_tags(text)
     today = datetime.now().strftime("%Y-%m-%d")
     rationale = (f"资讯源自动发布：{selected.get('form')}·{selected.get('source')}·"
                  f"{(selected.get('title') or '')[:36]}；选题：{why[:60]}")
     r2 = xc("POST", "/execute", {
         "kind": "post", "intent_id": f"cog-p-{datetime.now().strftime('%Y%m%d-%H%M')}",
-        "text": text, "rationale": rationale,
+        "text": text, "rationale": rationale, "growth_tags": growth_tagged,
     }, timeout=120)
     if r2.get("status") == "pending_review":
         st["last_post_date"] = today

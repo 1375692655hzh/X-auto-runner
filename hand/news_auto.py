@@ -770,6 +770,32 @@ def replay(hours=24, resume=False):
     print(f"完整证据：{out_path}", flush=True)
 
 
+GROWTH_TAGS = "#蓝V互关 #交朋友 #浇朋友"
+GROWTH_TAG_PROB = 1 / 3  # 运营拍板 2026-11-10：主脑产出帖 1/3 带互关tag（对齐 x-auto-tool tags_every=3）
+
+
+def _growth_tags():
+    import random
+    return GROWTH_TAGS if random.SystemRandom().random() < GROWTH_TAG_PROB else ""
+
+
+def _apply_growth_tags(text):
+    """机器层 1/3 概率追加互关tag（2026-11-10 运营拍板）。
+    不进入作者/编辑提示词——在编辑 accept 后追加，等同排版操作；
+    超出发稿长度预算则自动放弃并留审计。返回 (最终文本, 是否带tag)。"""
+    tags = _growth_tags()
+    if not tags:
+        return text, False
+    from account_status import post_max_len
+    from quality import weighted_len
+    cand = f"{text}\n\n{tags}"
+    if weighted_len(cand) <= (post_max_len() or 10 ** 9):
+        return cand, True
+    log_event("news_auto", "wcixot", action="growthTagSkip",
+              note="长度预算不足，自动放弃tag")
+    return text, False
+
+
 def _fetch_new(st):
     """两类 Source 各自保存 last_time；当批用 next_cursor 完整翻页。
     返回（未评条目, 本次观察到的各源最大时间）；评分成功后才推进位置。
@@ -903,6 +929,7 @@ def tick():
                                           if s.get("story_id") == story_id), {}),
                                     recent_history() + drafted)
             text = produced["text"]
+            text, growth_tagged = _apply_growth_tags(text)
         except EditorialSkip as e:
             _audit("editorial_skip", item_id=it.get("id"), story_id=story_id,
                    ticket=iid, note=str(e)[:160])
@@ -933,9 +960,11 @@ def tick():
                        "increment": r["increment"], "selection_reason": r["reason"]}
         rationale = (f"资讯源自动发布：{r['tier']}·{r['score']}分·{full.get('form')}·{full.get('source')}；"
                      f"增量：{r['increment'][:70]}")
+        if growth_tagged:
+            _audit("growth_tag", item_id=it.get("id"), story_id=story_id, ticket=iid)
         res = xc("POST", "/execute", {"kind": "post", "intent_id": iid,
                                       "text": text.strip(), "rationale": rationale,
-                                      "news_detail": news_detail,
+                                      "news_detail": news_detail, "growth_tags": growth_tagged,
                                       "value_reviews": produced["reviews"],
                                       "mandate": make_mandate(r, story_id)}, timeout=120)
         status = _execute_route(res)
