@@ -326,7 +326,11 @@ class Gateway:
         with self.q.mutex:
             self.seq += 1
             seq = self.seq
-        self.q.put((PRIORITY.get(kind, 3), seq, (intent, ev, box)))
+        # 优先级：既有四级（post 0 > reply/comment 1 > like/follow 2 > browse 3）之上，
+        # 运营者手动任务（origin=manual）绝对优先（-1 级）——人工加稿是增量任务，
+        # 到队即插队，不排任何 auto 的队（2026-11-10 运营拍板）。
+        prio = -1 if intent.get("origin") == "manual" else PRIORITY.get(kind, 3)
+        self.q.put((prio, seq, (intent, ev, box)))
         if not ev.wait(timeout):
             raise Deny("QUEUE_TIMEOUT", "单飞队列等待超时")
         if box.get("deny"):
