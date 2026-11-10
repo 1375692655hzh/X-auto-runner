@@ -175,13 +175,50 @@ class LLM:
                           note="决策通道失败，回退default")
                 return self.chat_messages("default", messages, temperature=temperature,
                                           max_tokens=max_tokens, timeout=timeout, retries=retries)
+        # 全链失败必须落审计——2026-11 阿里 decision 端点静默失败一整月
+        # （4205 次 functionFallback 无人发现）的教训：没有日志就没有告警。
+        log_event("llm", self.account, action="chainFail", fn=fn,
+                  note=(" ‖ ".join(errs))[:200])
         raise RuntimeError(f"llm.{fn} 全供应商链失败（{len(providers)}家）: "
                            + " ‖ ".join(errs))
 
-    def _post(self, fn, c, body, timeout, retries) -> str:
+    def probe_heads(self, fns=("default", "decision", "review")):
+        """主动健康探针：逐一 ping 各通道链上每家供应商（只测连通+额度，
+        不碰熔断器、不触发回退、不写 token 审计）。返回 [(fn, ok, detail)]。
+        2026-11-10 新增：qq_bot 每 30 分钟调用一次，供应商故障/额度耗尽
+        在 30 分钟内上 QQ 告警，不再依赖生产调用撞墙后才发现。"""
+        out, seen = [], set()
+        for fn in fns:
+            c = self.conf(fn)
+            if not c:
+                continue
+            chain = [c] + [fp for fp in (c.get("fallback_providers") or [])
+                           if isinstance(fp, dict) and fp.get("model")
+                           and fp.get("api_key") and fp.get("base_url")]
+            for prov in chain:
+                tag = _prov_tag(prov)
+                if tag in seen:
+                    continue
+                seen.add(tag)
+                body = {"model": prov["model"], "max_tokens": 64,
+                        "messages": [{"role": "user", "content": "ping"}]}
+                if prov.get("temperature") is not None:
+                    body["temperature"] = float(prov["temperature"])
+                try:
+                    self._post(fn, prov, body, timeout=30, retries=0, quiet=True)
+                    out.append((fn, True, f"{prov['model']}@{_prov_tag(prov).split('|')[0]}"))
+                except _EmptyContent:
+                    # 端点+额度正常（HTTP 200 有 usage），只是思考型模型在小预算下
+                    # 思考吃光 token —— 探针目的是连通性，算活
+                    out.append((fn, True, f"{prov['model']}@{_prov_tag(prov).split('|')[0]}(思考占满预算,端点活)"))
+                except Exception as e:
+                    out.append((fn, False, f"{prov['model']}: {str(e)[:100]}"))
+        return out
+
+    def _post(self, fn, c, body, timeout, retries, quiet=False) -> str:
         """单模型请求+瞬态退避重试（429/5xx 长退避；4xx 确定性错误快失败）。
         401/402/403/404（key 无效/欠费/额度尽/模型不存在）抛 _ProviderDead，
-        由供应商链熔断该家并落到下一 key。"""
+        由供应商链熔断该家并落到下一 key。quiet=True 时不写 token 审计（探针用）。"""
         last, dead_code = None, None
         for i in range(retries + 1):
             transient = False
@@ -194,9 +231,10 @@ class LLM:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     d = json.loads(r.read())
                 usage = d.get("usage") or {}
-                log_event("llm", self.account, action="chat", fn=fn, model=body["model"],
-                          prompt_tokens=usage.get("prompt_tokens"),
-                          completion_tokens=usage.get("completion_tokens"))
+                if not quiet:
+                    log_event("llm", self.account, action="chat", fn=fn, model=body["model"],
+                              prompt_tokens=usage.get("prompt_tokens"),
+                              completion_tokens=usage.get("completion_tokens"))
                 ch = (d.get("choices") or [{}])[0]
                 content = (ch.get("message") or {}).get("content") or ""
                 if not content.strip():

@@ -92,16 +92,24 @@
 - 改票绑定 `base_revision`，作者收到当前正文；锁内复核版本，历史记录旧/新哈希。主脑无真实执行结果却声称已发/已改会被代码拦截；“直接发吧”走固定审批指令，unknown 不再显示为已发布。
 - 回归：作者system不含素材/指令/QQ记忆；编辑越权拦截；假发布拦截；有效 AMD 票经一次具体事实修复后 accept，仍 pending_review。
 
-## 独立决策通道（2026-11-04）
+## 独立决策通道（2026-11-04，2026-11-10 已移除）
 
-- 新增 `llm.decision`：阿里 Token Plan `decision-model-preview`，用于选题评分、名企/头部门槛、帖子值不值得互动等简单判断。
-- 不替代 QQ 自由对话、作者成稿或编辑审核；职责不混用。
-- 阿里通道失败时通过 `fallback_to_default` 回退 default 供应商链；模型可用性和简单决策实测通过。
-- 决策回归：必贝特 18/N、DeepSeek 88/A；名企门槛继续生效。
+- ~~新增 `llm.decision`：阿里 Token Plan `decision-model-preview`~~
+- **移除原因（2026-11-10 查实）**：该模型走 systemone 专用协议（`/compatible-mode/v1/systemone`，`state`+`questions` 结构，只输出 choice/noul/score 判定），**不支持 chat/completions**。生产配置按其走 chat/completions 调用，端点自始返回 HTTP 400 "url error"，全月静默失败 4205 次、全部经 `fallback_to_default` 由旧 default 链兜底——无人发现。且 decision 通道的实际消费者（选题评分 7000 字 JSON、标的 why 推理、信息卡入选理由）都是生成式任务，systemone 形态装不下。
+- 端点本身实测可用（systemone 协议，noul/choice 秒回）。若未来要把"值不值得互动/名企门槛"等真·分类判定迁过去，需先写协议适配层，留作可选项。
 
-## 供应商链与熔断（2026-11-05）
+## LLM 换链 GLM 与通道健康告警（2026-11-10 运营拍板）
 
-- `llm.py` 新增 `fallback_providers`：同通道跨供应商完整 key/端点按序互备。当前 default/analysis/review 为 Kimi 三模型链 → 火山 `deepseek-v4.1-flash`；阿里 DeepSeek 备用 key 已于 2026-11-06 按运营者要求从生产链移除。
+- **换链**：kimi 老链退役。所有职能（draft/reply/comment/report/analysis/review/decision）统一走 `default` 供应商链：GLM Coding Plan `glm-5.3-flash` 为主，DeepSeek 官方 `deepseek-chat`、火山 `deepseek-v4.1-flash` 按序互备（10 分钟熔断自动跳过，额度恢复回归原顺位）。探针实测三家端点全通；真实 decision 调用实证由 glm-5.3-flash 直服。
+- 附带事故：换链部署时 `chmod 600` 抹掉了配置文件的 ACL 读授权，ubuntu 身份服务起不来——已改 `ubuntu:root 600`（仅 root+属主可读），教训：该文件不要用 chmod 改权限，用 chown。
+- **通道健康三道防线**（回应对 decision 静默失败一整月无人发现的问责）：
+  1. `llm.py` 全供应商链失败先落审计 `chainFail` 再抛异常（此前无日志只能靠调用方间接发现）；
+  2. QQ `_ops_alerts` 扫描最近一小时 `chainFail`（任一即报）与 `functionFallback`（≥3 即报），按小时去重；
+  3. 每 30 分钟主动探针 `probe_heads()` ping 链上每家供应商（不写 token 审计、不碰熔断器；思考型模型小预算返回空属正常，HTTP 200 即算活），失败按小时去重上 QQ。
+
+## 供应商链与熔断（2026-11-05，2026-11-10 链首已换 GLM）
+
+- `llm.py` 新增 `fallback_providers`：同通道跨供应商完整 key/端点按序互备。~~当前 default/analysis/review 为 Kimi 三模型链 → 火山 `deepseek-v4.1-flash`~~（2026-11-10 起：GLM `glm-5.3-flash` → DeepSeek 官方 → 火山，见上节）；阿里 DeepSeek 备用 key 已于 2026-11-06 按运营者要求从生产链移除。
 - 触发背景：kimi 套餐额度耗尽（全模型 429），主脑 reply 与作者/编辑链同时瘫痪。
 - 熔断：401/402/403/404 或全模型 429 判定供应商死亡，熔断 10 分钟内直接跳过；恢复/额度重置后自动回归原顺位（kimi 仍是第一顺位）。
 - 429 且还有下家时不再同 key 逐个换模型硬撞（账号级限流换模型无意义），立即 failover；单供应商配置保持逐模型互备不变。

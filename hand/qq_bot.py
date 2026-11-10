@@ -55,6 +55,7 @@ class Bot:
         self._pause_armed = {}   # openid -> 停 指令的确认窗口起点
         self.ops_cfg = cfg.get("ops") or {}
         self._last_ops_check = 0
+        self._last_llm_probe = 0.0   # LLM 供应商主动探针（_ops_alerts 每30分钟）
 
     # ── 鉴权 ──
     def ensure_token(self):
@@ -198,6 +199,66 @@ class Bot:
                 if self.reply(oid, f"⚠️ 今日 LLM token 已达 {total:,}（告警线 {limit:,}），请检查任务量与供应商。", None):
                     notified[key] = "sent"
                     changed = True
+        # LLM 通道健康告警（2026-11-10 换链后新增）。背景：阿里 decision 端点
+        # 静默失败一整月（4205 次回退无人发现）。三道防线：全链失败落账即报、
+        # 回退一小时内激增即报、每 30 分钟主动探针各供应商连通+额度。
+        try:
+            now_utc = datetime.now(timezone.utc)
+            fb_hour = 0
+            day = datetime.now().strftime("%Y-%m")
+            logf = STATE_DIR / f"log-{day}.jsonl"
+            try:
+                with logf.open(encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            row = json.loads(line)
+                        except Exception:
+                            continue
+                        if row.get("action") == "chainFail":
+                            # 全链失败=该职能彻底无模型可用，任一即报（按小时去重）
+                            try:
+                                at = datetime.fromisoformat(str(row.get("at", "")))
+                                fresh = (now_utc - at).total_seconds() <= 3600
+                            except Exception:
+                                fresh = True
+                            if fresh:
+                                cf_key = "alert:chainFail:" + datetime.now().strftime("%Y-%m-%d-%H")
+                                if not notified.get(cf_key) and self.reply(
+                                        oid, f"🚨 LLM 全供应商链失败（{row.get('fn')}）："
+                                             f"{str(row.get('note') or '')[:150]}\n"
+                                             f"生产已受影响，请立即检查额度与端点。", None):
+                                    notified[cf_key] = "sent"
+                                    changed = True
+                        elif row.get("action") == "functionFallback":
+                            try:
+                                at = datetime.fromisoformat(str(row.get("at", "")))
+                                if (now_utc - at).total_seconds() <= 3600:
+                                    fb_hour += 1
+                            except Exception:
+                                fb_hour += 1
+            except FileNotFoundError:
+                pass
+            fb_key = "alert:fallback:" + datetime.now().strftime("%Y-%m-%d-%H")
+            if fb_hour >= 3 and not notified.get(fb_key):
+                if self.reply(oid, f"⚠️ LLM 通道回退激增：一小时内 functionFallback ×{fb_hour}。\n"
+                                   f"某通道配置可能已失效（参照 2026-11 阿里 decision 端点事故），请检查。", None):
+                    notified[fb_key] = "sent"
+                    changed = True
+        except Exception as e:
+            log_event("qqbot", self.account, action="llmAlertError", note=str(e)[:120])
+        if time.time() - self._last_llm_probe >= 1800:
+            self._last_llm_probe = time.time()
+            try:
+                from llm import LLM
+                bad = [d for _fn, ok, d in LLM().probe_heads() if not ok]
+                probe_key = "alert:llmprobe:" + datetime.now().strftime("%Y-%m-%d-%H")
+                if bad and not notified.get(probe_key):
+                    if self.reply(oid, "⚠️ LLM 供应商探针失败：\n· " + "\n· ".join(bad) +
+                                       "\n（回退链可能仍在兜底，请检查额度/端点）", None):
+                        notified[probe_key] = "sent"
+                        changed = True
+            except Exception as e:
+                log_event("qqbot", self.account, action="llmProbeError", note=str(e)[:120])
         # 生产线沉默告警：活跃窗内超 6h 无成功节拍且过开局宽限 → 按日去重。
         # 背景：2026-11-06~11-10 上游停摆 4 天无人发现，直到运营者追问产量。
         try:
