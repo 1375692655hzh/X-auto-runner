@@ -202,3 +202,9 @@ python /opt/xar/hand/news_auto.py
 - 首跑金标实证 4/4：收紧"宁缺毋滥"后存储案/CDS案 chain 为空是正确行为（v3 会凑 WDC 类）；泛政策负例不再凑电力股。
 - 保留项不变：白名单只收 NYSE/NASDAQ 主板（含 ADR）；ETF/OTC/未上市不入表；标签恒中性；不进首屏不贴落锤；月度荐股脸抽检；作者层 $代码仍限素材明示（author-system 硬底线），产业链扩展只发生在机器层。
 - 审计日志：directScan / chainWhy / rowDropped / verifyApplied / verifySkip / parseFail / chainSkip / skipLenBudget（P2 待接日聚合：droppedNonWhitelist topN 驱动白名单增补、chainWhy 抽样进日报）。
+
+## 编辑线专用通道（2026-11-11 编辑连败修复）
+
+- **事故**：全项目链头换 deepseek-flash（无思考）次日，作者频犯归因三层规则/算术错（智通转述署名残留、"据报道"口径漂移、股数×价格算错），编辑（规则执行正确）连拒——11-11 晨 6 稿全灭"二次编辑审核仍失败"，深度文零产出。
+- **修复**：`llm.draft` / `llm.review` 专用通道 → `deepseek-v4-pro`（思考档）头 + flash 兜底 + default 再兜底。同素材实验：flash 作者连败 vs v4-pro 一次修复过审（编辑思考 2400+ token 严格把关后 accept）；生产配置验证 CoreWeave 素材 98s 过审。
+- **教训**：换模型必审"该职能对模型的依赖结构"——作者/编辑吃思考质量，评分/路由吃速度。快链（flash）给量，思考链（v4-pro）给质，按职能分通道。
