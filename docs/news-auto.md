@@ -208,3 +208,9 @@ python /opt/xar/hand/news_auto.py
 - **事故**：全项目链头换 deepseek-flash（无思考）次日，作者频犯归因三层规则/算术错（智通转述署名残留、"据报道"口径漂移、股数×价格算错），编辑（规则执行正确）连拒——11-11 晨 6 稿全灭"二次编辑审核仍失败"，深度文零产出。
 - **修复**：`llm.draft` / `llm.review` 专用通道 → `deepseek-v4-pro`（思考档）头 + flash 兜底 + default 再兜底。同素材实验：flash 作者连败 vs v4-pro 一次修复过审（编辑思考 2400+ token 严格把关后 accept）；生产配置验证 CoreWeave 素材 98s 过审。
 - **教训**：换模型必审"该职能对模型的依赖结构"——作者/编辑吃思考质量，评分/路由吃速度。快链（flash）给量，思考链（v4-pro）给质，按职能分通道。
+
+## 每调用点显式 LLM 配置（2026-11-11 运营纠偏）
+
+- **教训**：原设计本就支持按职能独立配置，但 kimi 时代配置把全部职能折叠进 default 链，换链时整链整换——11-11 编辑连败事故即"换链头殃及作者职能"的直接后果。
+- **现状**：七个调用点全部显式配置，default 仅纯兜底——`draft/review`→deepseek-v4-pro（思考档）｜`reply/comment/report/decision`→deepseek-flash（快链组，YAML 锚点共用）｜`tickers`→ARK v4.1-flash。dormant systemone 资产改名 `decision_systemone` 保留（键位让给职能，资产裁决不变）。
+- **换模型纪律 v2**：只动对应职能段；快链给量、思考链给质；改后跑该职能的验证（编辑线=真实素材过审、判定器=金标、快链=探针+实调）。
